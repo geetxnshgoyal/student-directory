@@ -35,7 +35,6 @@ try {
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const nodemailer = require('nodemailer');
@@ -49,12 +48,6 @@ const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
-
-let storedPasswordHash = null;
-
-(async () => {
-    storedPasswordHash = await bcrypt.hash('123456778', 12);
-})();
 
 const otpStore = new Map();
 let adminOtpEntry = null;
@@ -675,6 +668,29 @@ function authenticateToken(req, res, next) {
     });
 }
 
+// Three different logins mint tokens: the shared directory password, the admin
+// OTP, and a student's own portal OTP. Verifying the signature alone is not
+// enough - without this, a student's token opens the admin directory.
+function tokenRole(user) {
+    if (user?.admin) return 'admin';
+    if (user?.a) return 'directory';
+    if (user?.student) return 'student';
+    return null;
+}
+
+function requireRole(...allowed) {
+    return (req, res, next) => {
+        authenticateToken(req, res, () => {
+            const role = tokenRole(req.user);
+            if (!role || !allowed.includes(role)) {
+                return res.status(403).json({ error: 'Not allowed' });
+            }
+            req.role = role;
+            next();
+        });
+    };
+}
+
 app.use((req, res, next) => {
     if (req.path.endsWith('.json') || req.path.endsWith('.txt')) {
         return res.status(403).json({ error: 'Access denied' });
@@ -691,26 +707,10 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public'), {
-    index: 'index.html',
+    index: 'carpool.html',
     dotfiles: 'deny'
 }));
 
-app.post('/api/login', authLimiter, async (req, res) => {
-    try {
-        const { password } = req.body;
-        if (!password) return res.status(400).json({ error: 'Password required' });
-        const isValid = await bcrypt.compare(password, storedPasswordHash);
-        if (!isValid) {
-            await new Promise(r => setTimeout(r, 1000));
-            return res.status(401).json({ error: 'Invalid password' });
-        }
-        const token = jwt.sign({ a: true, t: Date.now() }, JWT_SECRET, { expiresIn: '1h' });
-        res.json({ success: true, token });
-    } catch (e) {
-        console.error("Login error:", e);
-        res.status(500).json({ error: 'Server error' });
-    }
-});
 
 app.post('/api/admin/login', authLimiter, async (req, res) => {
     try {
@@ -760,7 +760,7 @@ app.post('/api/admin/verify', authLimiter, (req, res) => {
     res.json({ success: true, token });
 });
 
-app.get('/api/admin/students', apiLimiter, authenticateToken, async (req, res) => {
+app.get('/api/admin/students', apiLimiter, requireRole('admin'), async (req, res) => {
     try {
         const firebaseStudents = await loadStudentsFromFirestore();
         if (!firebaseStudents) {
@@ -773,65 +773,7 @@ app.get('/api/admin/students', apiLimiter, authenticateToken, async (req, res) =
     }
 });
 
-app.post('/api/portal/request-otp', apiLimiter, async (req, res) => {
-    try {
-        const { usn } = req.body || {};
-        if (!usn) return res.status(400).json({ error: 'USN required' });
-        if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
 
-        let students = await loadStudentsFromFirestore();
-        if (!students) return res.status(500).json({ error: 'Database service offline' });
-        const student = students.find(s => s.usn === usn);
-
-        if (!student || student.status === 'left') return res.status(404).json({ error: 'Student not found' });
-
-        const email = student.institutional_email || student.email;
-        if (!email) return res.status(400).json({ error: 'No email found for student' });
-
-        if (!mailer) return res.status(503).json({ error: 'Email service offline' });
-
-        const otp = String(crypto.randomInt(100000, 1000000));
-        otpStore.set(usn + "_portal", { otp, email, expiresAt: Date.now() + 10 * 60 * 1000 });
-
-        await mailer.sendMail({
-            from: process.env.SMTP_FROM || process.env.SMTP_USER,
-            to: email,
-            subject: 'NST Portal OTP',
-            text: `Your NST portal login OTP is ${otp}. It expires in 10 minutes.`
-        });
-
-        res.json({ success: true, emailHint: email.replace(/(.{2})([^@]*)(@.*)/, '$1***$3') });
-    } catch (e) {
-        console.error("Portal OTP send error:", e);
-        res.status(500).json({ error: 'OTP send failed' });
-    }
-});
-
-app.post('/api/portal/verify-otp', apiLimiter, async (req, res) => {
-    try {
-        const { usn, otp } = req.body || {};
-        if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
-
-        const entry = otpStore.get(usn + "_portal");
-        if (!entry || entry.expiresAt <= Date.now()) return res.status(400).json({ error: 'OTP expired' });
-        if (entry.otp !== otp) return res.status(400).json({ error: 'OTP invalid' });
-
-        otpStore.delete(usn + "_portal");
-
-        let students = await loadStudentsFromFirestore();
-        if (!students) return res.status(500).json({ error: 'Database service offline' });
-        const student = students.find(s => s.usn === usn);
-
-        if (!student) return res.status(404).json({ error: 'Student not found' });
-
-        const token = jwt.sign({ usn, student: true, t: Date.now() }, JWT_SECRET, { expiresIn: '1h' });
-
-        res.json({ success: true, token, student });
-    } catch (e) {
-        console.error("Portal verification failed:", e);
-        res.status(500).json({ error: 'Verification failed' });
-    }
-});
 
 app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
     try {
@@ -1085,44 +1027,24 @@ app.post('/api/carpool/cancel', apiLimiter, requireCarpoolSession, async (req, r
 });
 
 
-app.get('/api/verify', authenticateToken, (req, res) => {
-    res.json({ valid: true });
-});
 
-app.get('/api/students', apiLimiter, authenticateToken, async (req, res) => {
-    try {
-        const firebaseStudents = await loadStudentsFromFirestore();
-        if (firebaseStudents) {
-            const activeStudents = firebaseStudents.filter(s => s.status !== 'left');
-            return res.json(activeStudents);
-        }
-        return res.status(500).json({ error: 'Database service offline' });
-    } catch (e) {
-        console.error("Firestore loading error:", e);
-        return res.status(500).json({ error: 'Error loading data' });
-    }
-});
 
-app.post('/api/logout', authenticateToken, (req, res) => {
-    res.json({ success: true });
-});
 
 // Expose Serverless Cron trigger for Vercel / GitHub Actions
 app.get('/api/cron/birthday', async (req, res) => {
     const authHeader = req.headers.authorization;
     const secretQuery = req.query.secret;
     const expectedSecret = process.env.CRON_SECRET;
-    
-    console.log(`[Cron Debug] expectedSecret: ${expectedSecret ? 'Defined (len: ' + String(expectedSecret).length + ')' : 'Undefined'}`);
-    console.log(`[Cron Debug] secretQuery: ${secretQuery ? 'Defined (len: ' + String(secretQuery).length + ')' : 'Undefined/Empty'}`);
-    console.log(`[Cron Debug] authHeader: ${authHeader ? 'Defined (len: ' + String(authHeader).length + ')' : 'Undefined/Empty'}`);
 
-    if (expectedSecret) {
-        const authorized = authHeader === `Bearer ${expectedSecret}` || secretQuery === expectedSecret;
-        if (!authorized) {
-            console.warn(`[Cron Debug] Authorization check failed. queryMatches: ${secretQuery === expectedSecret}, headerMatches: ${authHeader === 'Bearer ' + expectedSecret}`);
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+    // Fail closed. Without a secret this endpoint would let anyone fire the
+    // day's emails.
+    if (!expectedSecret) {
+        console.error('CRON_SECRET is not configured; refusing to run the birthday job.');
+        return res.status(503).json({ error: 'Cron secret not configured' });
+    }
+
+    if (authHeader !== `Bearer ${expectedSecret}` && secretQuery !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
     
     try {
@@ -1147,7 +1069,11 @@ app.get('*', (req, res) => {
     if (req.path.includes('..') || req.path.includes('//')) {
         return res.status(403).json({ error: 'Access denied' });
     }
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    // A missing asset should 404, not quietly return the app shell.
+    if (/\.[a-z0-9]{2,5}$/i.test(req.path)) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    res.sendFile(path.join(__dirname, 'public', 'carpool.html'));
 });
 
 app.use((err, req, res, next) => {
