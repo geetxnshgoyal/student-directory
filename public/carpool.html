@@ -4,177 +4,316 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NST Carpool</title>
+    <title>NST Carpool — Split the airport run</title>
+    <meta name="description" content="Post your airport run and match with NST students travelling within the hour.">
+    <meta name="theme-color" content="#0A0E17">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="carpool.css">
     <link rel="icon" type="image/png" href="favicon.png">
+    <script>
+        // Set the theme before first paint so there is no flash of the wrong one.
+        (function () {
+            try {
+                var saved = localStorage.getItem('cp_theme');
+                document.documentElement.dataset.theme = saved
+                    || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            } catch (e) {
+                document.documentElement.dataset.theme = 'dark';
+            }
+        })();
+    </script>
 </head>
 
 <body>
-    <div class="ambient-light"></div>
-    <div class="ambient-light-2"></div>
+    <!-- ============ AUTH ============ -->
+    <div id="auth-view" class="view active">
+        <div class="auth-shell">
+            <button type="button" class="theme-toggle auth-theme-toggle" data-theme-toggle
+                aria-label="Switch between light and dark">
+                <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4.5" />
+                    <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8" />
+                </svg>
+                <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" aria-hidden="true">
+                    <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+                </svg>
+            </button>
 
-    <div class="app-container">
-        <!-- Auth View -->
-        <div id="auth-view" class="view active">
-            <div class="glass-panel auth-panel">
-                <div class="brand-header">
-                    <h1>NST Carpool</h1>
-                    <p>Exclusive Student Portal</p>
-                </div>
+            <aside class="auth-pitch">
+                <a class="brand" href="/">
+                    <img class="brand-glyph" src="devforge-mark.png" alt="" width="26" height="26">
+                    <span class="brand-name">NST Carpool</span>
+                </a>
 
-                <!-- Step 1: USN -->
-                <form id="login-form" class="auth-step active">
-                    <div class="input-group">
-                        <label>Enter Serial Number (USN)</label>
-                        <input type="text" id="usn-input" placeholder="e.g. 2102508748" maxlength="10" required>
-                    </div>
-                    <button type="submit" class="btn-primary">
-                        <span>Continue</span>
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <path d="M5 12h14M12 5l7 7-7 7" />
-                        </svg>
-                    </button>
-                    <p class="status-msg" id="login-status"></p>
-                </form>
+                <h1 class="pitch-headline">Split the<br><em>airport run</em>.</h1>
+                <p class="pitch-lede">
+                    Post your flight time. We'll show you which students are heading the same way
+                    within the hour, and email the introduction.
+                </p>
 
-                <!-- Step 2: OTP -->
-                <form id="otp-form" class="auth-step">
-                    <div class="otp-header">
-                        <button type="button" id="back-to-login" class="btn-icon">←</button>
-                        <span>Verify Identity</span>
+                <!-- Static preview of the live board's time rail -->
+                <figure class="pitch-rail" aria-hidden="true">
+                    <figcaption class="pitch-rail-cap">Your match window</figcaption>
+                    <div class="prail">
+                        <div class="prail-band"></div>
+                        <div class="prail-line"></div>
+                        <span class="prail-pin is-near" style="left:8%"></span>
+                        <span class="prail-pin is-match" style="left:34%"></span>
+                        <span class="prail-pin is-you" style="left:50%"></span>
+                        <span class="prail-pin is-match" style="left:68%"></span>
+                        <span class="prail-pin is-near" style="left:93%"></span>
                     </div>
-                    <p class="helper-text">OTP sent to your official email ending in <span id="email-hint">...</span>
-                    </p>
-                    <div class="input-group">
-                        <input type="text" id="otp-input" placeholder="Enter 6-digit OTP" maxlength="6" required
-                            class="otp-field">
+                    <div class="prail-scale">
+                        <span>−30 min</span>
+                        <span>your flight</span>
+                        <span>+30 min</span>
                     </div>
-                    <button type="submit" class="btn-primary">
-                        <span>Verify & Login</span>
-                    </button>
-                    <div class="resend-container" style="text-align: center; margin-top: 15px;">
-                        <button type="button" id="resend-otp-btn" class="btn-link" disabled>
-                            Resend OTP <span id="resend-timer">(30s)</span>
+                </figure>
+
+                <p class="pitch-foot">Verified with your college email. We only pass on your contact
+                    details when you tap Connect yourself.</p>
+            </aside>
+
+            <div class="auth-panel">
+                <div class="auth-card">
+                    <!-- Step 1: USN -->
+                    <form id="login-form" class="auth-step active" novalidate>
+                        <p class="eyebrow">Step 1 of 2</p>
+                        <h2 class="auth-title">Sign in</h2>
+                        <p class="auth-sub">We'll send a code to your college email.</p>
+
+                        <div class="field">
+                            <label for="usn-input">Serial number (USN)</label>
+                            <input type="text" id="usn-input" placeholder="2102508748" maxlength="10"
+                                inputmode="numeric" pattern="[0-9]{10}" autocomplete="username" required>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-block">
+                            <span>Send code</span>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2.5" aria-hidden="true">
+                                <path d="M5 12h14M12 5l7 7-7 7" />
+                            </svg>
                         </button>
-                    </div>
-                    <p class="status-msg" id="otp-status"></p>
-                </form>
-            </div>
-        </div>
-
-        <!-- Dashboard View -->
-        <div id="dashboard-view" class="view">
-            <header class="main-header">
-                <div class="user-profile">
-                    <div class="avatar" id="user-avatar">?</div>
-                    <div class="user-info">
-                        <span id="user-usn">Loading...</span>
-                        <span id="user-email" class="sub-text">...</span>
-                    </div>
-                </div>
-                <button id="logout-btn" class="btn-ghost">Logout</button>
-            </header>
-
-            <main class="dashboard-content">
-
-                <!-- Home Dashboard (Trip Selection) -->
-                <div id="home-dashboard">
-                    <section class="trip-selector" id="trip-selector">
-                        <h2>Start a Journey</h2>
-                        <div class="cards-grid">
-                            <div class="card trip-card" data-type="hostel">
-                                <div class="card-icon">🏠</div>
-                                <h3>To Hostel</h3>
-                                <p>Landing at BLR Airport</p>
-                            </div>
-                            <div class="card trip-card" data-type="airport">
-                                <div class="card-icon">✈️</div>
-                                <h3>To Airport</h3>
-                                <p>Departing from Campus</p>
-                            </div>
-                        </div>
-                    </section>
-                </div>
-
-                <!-- Trip Details Form -->
-                <section class="trip-form hidden" id="trip-details-form">
-                    <div class="form-header">
-                        <button class="btn-icon" id="back-to-selection">←</button>
-                        <h3 id="form-title">Trip Details</h3>
-                    </div>
-
-                    <form id="create-request-form">
-                        <div class="input-grid">
-                            <div class="input-group">
-                                <label id="time-label">Landing Time</label>
-                                <input type="datetime-local" id="time-input" required>
-                            </div>
-                            <div class="input-group">
-                                <label>Flight Number (Optional)</label>
-                                <input type="text" id="flight-input" placeholder="e.g. 6E 505">
-                            </div>
-                            <div class="input-group">
-                                <label>Wait Tolerance</label>
-                                <select id="wait-input">
-                                    <option value="15">± 15 Mins</option>
-                                    <option value="30" selected>± 30 Mins</option>
-                                    <option value="60">± 1 Hour</option>
-                                </select>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn-primary full-width">Find Travel Buddies</button>
+                        <p class="status-msg" id="login-status" role="status" aria-live="polite"></p>
                     </form>
-                </section>
 
-                <!-- User Active Request Board -->
-                <section class="status-board hidden" id="status-board">
-                    <div class="board-header">
-                        <h3>Your Status</h3>
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <span class="badge-live">Live Board</span>
-                        </div>
-                    </div>
-
-                    <div class="my-request-card" id="my-request-card">
-                        <!-- Populated by JS -->
-                    </div>
-
-                    <h3>Your Matches</h3>
-                    <div class="matches-list" id="matches-list">
-                        <!-- Populated by JS -->
-                        <div class="empty-state">Looking for matches...</div>
-                    </div>
-
-                    <button id="cancel-request-btn" class="btn-danger">Cancel Request</button>
-                </section>
-
-                <!-- Public Live Board (Persistent) -->
-                <section class="public-board-section" id="public-board-container">
-                    <div class="board-header">
-                        <h3>Current Active Requests</h3>
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <button class="btn-icon refresh-btn" onclick="refreshStatus()" title="Refresh">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white"
-                                    stroke-width="2.5">
-                                    <path d="M21 2v6h-6M3 22v-6h6M21 13A9 9 0 1 1 3 13" />
+                    <!-- Step 2: OTP -->
+                    <form id="otp-form" class="auth-step" novalidate>
+                        <div class="step-head">
+                            <button type="button" id="back-to-login" class="btn-icon" aria-label="Back">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2.5" aria-hidden="true">
+                                    <path d="M19 12H5M12 19l-7-7 7-7" />
                                 </svg>
                             </button>
-                            <span class="sub-text" style="font-weight:700;"><span id="public-count">0</span>
-                                Traveling</span>
+                            <div>
+                                <p class="eyebrow">Step 2 of 2</p>
+                                <h2 class="auth-title">Enter your code</h2>
+                            </div>
+                        </div>
+                        <p class="auth-sub">Sent to <span id="email-hint" class="mono">your college email</span></p>
+
+                        <div class="field">
+                            <label for="otp-input">6-digit code</label>
+                            <input type="text" id="otp-input" placeholder="000000" maxlength="6" required
+                                inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" class="otp-field">
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-block">
+                            <span>Verify and continue</span>
+                        </button>
+
+                        <div class="resend-row">
+                            <button type="button" id="resend-otp-btn" class="btn-link" disabled>
+                                Resend code <span id="resend-timer" class="mono"></span>
+                            </button>
+                        </div>
+                        <p class="status-msg" id="otp-status" role="status" aria-live="polite"></p>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ DASHBOARD ============ -->
+    <div id="dashboard-view" class="view">
+        <header class="topbar">
+            <div class="topbar-inner">
+                <a class="brand" href="/">
+                    <img class="brand-glyph" src="devforge-mark.png" alt="" width="26" height="26">
+                    <span class="brand-name">NST Carpool</span>
+                </a>
+                <div class="topbar-right">
+                    <div class="identity">
+                        <div class="avatar" id="user-avatar" aria-hidden="true"></div>
+                        <div class="identity-text">
+                            <span id="user-usn">Loading</span>
+                            <span id="user-email"></span>
                         </div>
                     </div>
-                    <div class="matches-list" id="public-board-list">
-                        <div class="empty-state">Loading live requests...</div>
+                    <button type="button" class="theme-toggle" data-theme-toggle
+                        aria-label="Switch between light and dark">
+                        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <circle cx="12" cy="12" r="4.5" />
+                            <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8" />
+                        </svg>
+                        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+                        </svg>
+                    </button>
+                    <button id="logout-btn" class="btn btn-quiet">Sign out</button>
+                </div>
+            </div>
+        </header>
+
+        <main class="page">
+            <!-- State A: choose a direction -->
+            <section id="home-dashboard" class="pick">
+                <div class="pick-head">
+                    <p class="eyebrow">Step 1 of 2</p>
+                    <h1 class="pick-title">Where are you headed?</h1>
+                    <p class="lede">Pick a direction, add your time, and we'll watch the board for you.</p>
+                </div>
+
+                <div class="pick-grid">
+                    <button type="button" class="trip-card" data-type="hostel">
+                        <span class="trip-tag trip-tag-arrive">Arriving</span>
+                        <span class="trip-icon" aria-hidden="true">
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.75">
+                                <path d="M19 14l-7 7-7-7" />
+                                <path d="M12 3v18" />
+                            </svg>
+                        </span>
+                        <span class="trip-name">Airport → Hostel</span>
+                        <span class="trip-desc">You're landing at BLR and need a ride to campus.</span>
+                    </button>
+
+                    <button type="button" class="trip-card" data-type="airport">
+                        <span class="trip-tag trip-tag-depart">Departing</span>
+                        <span class="trip-icon" aria-hidden="true">
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.75">
+                                <path d="M5 10l7-7 7 7" />
+                                <path d="M12 21V3" />
+                            </svg>
+                        </span>
+                        <span class="trip-name">Hostel → Airport</span>
+                        <span class="trip-desc">You're leaving campus to catch a flight.</span>
+                    </button>
+                </div>
+
+                <p class="pick-foot">
+                    <span class="dot-live" aria-hidden="true"></span>
+                    <span class="mono" id="pick-count">0</span> students on the board right now
+                </p>
+            </section>
+
+            <!-- State B: trip details -->
+            <section class="sheet hidden" id="trip-details-form">
+                <div class="step-head">
+                    <button type="button" class="btn-icon" id="back-to-selection" aria-label="Back">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2.5" aria-hidden="true">
+                            <path d="M19 12H5M12 19l-7-7 7-7" />
+                        </svg>
+                    </button>
+                    <div>
+                        <p class="eyebrow" id="form-eyebrow">Step 2 of 2</p>
+                        <h2 class="sheet-title" id="form-title">Trip details</h2>
                     </div>
+                </div>
+
+                <form id="create-request-form" novalidate>
+                    <div class="field">
+                        <label for="time-input" id="time-label">Landing time</label>
+                        <input type="datetime-local" id="time-input" required>
+                        <p class="field-hint">All times are India Standard Time.</p>
+                    </div>
+
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="flight-input">Flight number <span class="optional">optional</span></label>
+                            <input type="text" id="flight-input" placeholder="6E 505" maxlength="10"
+                                autocomplete="off" class="mono">
+                        </div>
+                        <div class="field">
+                            <label for="wait-input">How long will you wait?</label>
+                            <select id="wait-input">
+                                <option value="15">Up to 15 minutes</option>
+                                <option value="30" selected>Up to 30 minutes</option>
+                                <option value="60">Up to an hour</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-block">
+                        <span id="trip-submit-label">Post my trip</span>
+                    </button>
+                    <p class="status-msg" id="trip-status" role="status" aria-live="polite"></p>
+                </form>
+            </section>
+
+            <!-- State C: live board -->
+            <div id="status-board" class="hidden">
+                <!-- Signature: the departure rail -->
+                <section class="rail-card">
+                    <header class="rail-head">
+                        <div class="rail-headline">
+                            <p class="eyebrow" id="rail-eyebrow">Your trip</p>
+                            <h1 class="rail-time mono" id="rail-time">--:--</h1>
+                            <p class="rail-meta" id="rail-meta"></p>
+                        </div>
+                        <div class="rail-aside">
+                            <span class="chip chip-live"><span class="dot-live" aria-hidden="true"></span>Live</span>
+                            <div class="rail-controls">
+                                <button id="edit-request-btn" class="btn btn-quiet">Change time</button>
+                                <button id="cancel-request-btn" class="btn btn-quiet btn-quiet-danger">Cancel trip</button>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div class="rail" id="rail"></div>
+                    <p class="rail-legend" id="rail-legend"></p>
                 </section>
-            </main>
-        </div>
+
+                <div class="columns">
+                    <section class="col-main">
+                        <div class="section-head">
+                            <h2 class="section-title">Your matches</h2>
+                            <span class="count mono" id="match-count">0</span>
+                        </div>
+                        <div id="matches-list" class="stack"></div>
+                    </section>
+
+                    <aside class="col-side">
+                        <div class="section-head">
+                            <h2 class="section-title">Everyone travelling</h2>
+                            <span class="section-head-right">
+                                <span class="count mono" id="public-count">0</span>
+                                <button type="button" id="refresh-board-btn" class="btn-icon"
+                                    aria-label="Refresh board">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5" aria-hidden="true">
+                                        <path d="M21 2v6h-6M3 22v-6h6M21 13A9 9 0 1 1 3 13" />
+                                    </svg>
+                                </button>
+                            </span>
+                        </div>
+                        <div id="public-board-list" class="stack"></div>
+                    </aside>
+                </div>
+            </div>
+        </main>
     </div>
 
     <script src="carpool.js"></script>

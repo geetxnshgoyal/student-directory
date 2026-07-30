@@ -2,27 +2,50 @@ name: Daily Birthday Scheduler
 
 on:
   schedule:
-    - cron: '30 18 * * *' # 6:30 PM UTC / 12:00 AM Asia/Kolkata daily
+    # GitHub only promises best effort on schedules, so fire several attempts
+    # around 00:00 IST. The server claims the day atomically, so whichever lands
+    # first sends the mail and the rest are no-ops.
+    - cron: '20 18 * * *' # 23:50 IST - starts early, then holds until the target
+    - cron: '30 18 * * *' # 00:00 IST
+    - cron: '40 18 * * *' # 00:10 IST
   workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+
+concurrency:
+  group: daily-birthday-scheduler
+  cancel-in-progress: false
 
 jobs:
   trigger-scheduler:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Birthday Portal API
+      - name: Hold until 00:00 IST
+        if: github.event_name == 'schedule'
         run: |
-          DOMAIN="${{ secrets.PORTAL_DOMAIN }}"
-          # Fallback to default Vercel domain if secret is not set
-          if [ -z "$DOMAIN" ]; then
-            DOMAIN="nst-blr.vercel.app"
+          TARGET=$(date -u -d 'today 18:30' +%s)   # 18:30 UTC == 00:00 IST
+          NOW=$(date -u +%s)
+          if [ "$NOW" -lt "$TARGET" ]; then
+            WAIT=$(( TARGET - NOW ))
+            [ "$WAIT" -gt 1800 ] && WAIT=1800
+            echo "Runner started early. Holding ${WAIT}s until 00:00 IST."
+            sleep "$WAIT"
+          else
+            echo "Runner started $(( (NOW - TARGET) / 60 )) min after target. Going now."
           fi
-          
-          # Automatically strip http://, https://, and trailing slashes if present in variable
-          DOMAIN=$(echo "$DOMAIN" | sed -e 's|^https://||' -e 's|^http://||' -e 's|/$||')
-          
-          SECRET="${{ secrets.CRON_SECRET }}"
-          
-          echo "⚡ Triggering Daily Birthday checklist on: $DOMAIN"
-          curl -f -s -X GET "https://$DOMAIN/api/cron/birthday?secret=$SECRET" \
-            -H "Authorization: Bearer $SECRET"
-          echo "✅ Trigger completed successfully!"
+
+      - name: Trigger Birthday Portal API
+        env:
+          PORTAL_DOMAIN: ${{ secrets.PORTAL_DOMAIN }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          DOMAIN="${PORTAL_DOMAIN:-nst-blr.vercel.app}"
+          DOMAIN=$(echo "$DOMAIN" | sed -e 's|^https\?://||' -e 's|/$||')
+
+          echo "⚡ Triggering on $DOMAIN at $(TZ=Asia/Kolkata date '+%H:%M:%S') IST"
+
+          # Secret travels in the header only - query strings land in access logs.
+          curl -fsS --retry 3 --retry-delay 5 --max-time 120 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "https://$DOMAIN/api/cron/birthday"
+
+          echo ""
+          echo "✅ Completed at $(TZ=Asia/Kolkata date '+%H:%M:%S') IST"

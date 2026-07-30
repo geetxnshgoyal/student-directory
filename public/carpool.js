@@ -1,5 +1,8 @@
 
 const API_BASE = '/api/carpool';
+const POLL_MS = 15000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const CP_KEYS = ['cp_token', 'cp_usn', 'cp_email', 'cp_name', 'cp_photo', 'cp_req_id', 'cp_req_time'];
 
 // State
 let state = {
@@ -8,13 +11,17 @@ let state = {
     email: localStorage.getItem('cp_email') || null,
     name: localStorage.getItem('cp_name') || null,
     photo: localStorage.getItem('cp_photo') || null,
-    direction: null, // 'hostel' or 'airport'
-    requestId: localStorage.getItem('cp_req_id') || null,
-    requestTime: localStorage.getItem('cp_req_time') || null,
-    matches: [],
-    resendTimer: 0
+    direction: null,
+    myRequest: null,
+    screen: 'auth',
+    pollTimer: null,
+    resendTimer: null,
+    resendSeconds: 0
 };
 
+const acceptedMatches = new Set();
+let lastMatchesSignature = null;
+let lastBoardSignature = null;
 
 // DOM Elements
 const views = {
@@ -37,7 +44,7 @@ const inputs = {
 };
 
 const sections = {
-    selector: document.getElementById('trip-selector'),
+    home: document.getElementById('home-dashboard'),
     form: document.getElementById('trip-details-form'),
     board: document.getElementById('status-board')
 };
@@ -47,85 +54,225 @@ const status = {
     otp: document.getElementById('otp-status')
 };
 
-// Init
-function init() {
-    if (state.token) {
-        showDashboard();
-    } else {
-        showAuth();
+// Utilities
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[ch]);
+}
+
+function safePhotoUrl(value) {
+    const url = String(value || '').trim();
+    return /^(https:\/\/|data:image\/)/i.test(url) ? url : '';
+}
+
+function setStatus(el, msg, type) {
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = `status-msg ${type || 'neutral'}`;
+}
+
+function clearCarpoolStorage() {
+    // Only touch our own keys - the student portal shares this origin, and the
+    // theme choice should survive signing out.
+    for (const key of CP_KEYS) localStorage.removeItem(key);
+}
+
+// Theme. The initial value is set by an inline script in <head> to avoid a flash.
+document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = next;
+        try {
+            localStorage.setItem('cp_theme', next);
+        } catch {
+            // Private browsing; the choice just won't persist.
+        }
+    });
+});
+
+// The form collects Bangalore wall-clock time. Pin the offset explicitly so the
+// server and every other device agree on the actual instant.
+function istInputToIso(value) {
+    if (!value) return null;
+    const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? `${value}:00` : value;
+    const parsed = new Date(`${withSeconds}+05:30`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function istInputNow() {
+    return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 16);
+}
+
+// Back the other way, to prefill the form when editing an existing trip.
+function isoToIstInput(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime())
+        ? ''
+        : new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16);
+}
+
+const TIME_FMT = { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true };
+const DATE_FMT = { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' };
+
+function formatTime(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '--:--' : date.toLocaleTimeString('en-IN', TIME_FMT);
+}
+
+function formatDate(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('en-IN', DATE_FMT);
+}
+
+// "02:40 pm" -> "02:40" + a small-caps suffix, so mono times stay tight.
+function timeHtml(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return '--:--';
+    const [clock, suffix] = date.toLocaleTimeString('en-IN', TIME_FMT).split(' ');
+    return escapeHtml(clock) + (suffix ? `<span class="tsuffix">${escapeHtml(suffix)}</span>` : '');
+}
+
+function formatDateLong(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime())
+        ? ''
+        : date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'long' });
+}
+
+// Keeps a generated line stable across polls instead of reshuffling every refresh.
+function seededIndex(seed, length) {
+    let hash = 0;
+    for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) % 1000003;
+    return hash % length;
+}
+
+async function api(path, options = {}) {
+    const res = await fetch(`${API_BASE}${path}`, {
+        ...options,
+        headers: {
+            ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+            ...options.headers
+        }
+    });
+
+    if (res.status === 401 && state.token) {
+        handleSessionExpiry();
+        throw new Error('session-expired');
     }
 
-    // Set min date to now
-    const now = new Date();
-    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-    inputs.time.min = now.toISOString().slice(0, 16);
+    let data = null;
+    try {
+        data = await res.json();
+    } catch {
+        data = null;
+    }
+
+    if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+    return data || {};
+}
+
+function handleSessionExpiry() {
+    stopPolling();
+    clearCarpoolStorage();
+    state.token = null;
+    state.myRequest = null;
+    showAuth();
+    setStatus(status.login, 'Your session expired. Please verify again.', 'error');
 }
 
 // Navigation / View Logic
 function showAuth() {
+    state.screen = 'auth';
     views.auth.classList.add('active');
     views.dashboard.classList.remove('active');
     forms.login.classList.add('active');
     forms.otp.classList.remove('active');
+    stopResendTimer();
 }
 
 function showDashboard() {
     views.auth.classList.remove('active');
     views.dashboard.classList.add('active');
-
-    const savedName = localStorage.getItem('cp_name');
-    const savedPhoto = localStorage.getItem('cp_photo');
-    const savedEmail = localStorage.getItem('cp_email');
-
-    // Optimistic UI Update
-    document.getElementById('user-usn').textContent = state.name || savedName || state.usn || 'Student';
-    document.getElementById('user-email').textContent = state.email || savedEmail || '';
-
-    // Avatar
-    const avatarEl = document.getElementById('user-avatar');
-    const photoUrl = state.photo || savedPhoto;
-
-    if (photoUrl) {
-        avatarEl.innerHTML = `<img src="${photoUrl}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">`;
-    } else {
-        avatarEl.textContent = (state.usn || 'U').slice(-2);
-    }
-
-    if (state.requestId) {
-        showBoard();
-    } else {
-        showSelector();
-    }
-    startDashboardServices();
+    renderProfile();
+    showSelector();
+    startPolling();
 }
 
 function showSelector() {
-    document.getElementById('home-dashboard').classList.remove('hidden');
-    // Gatekeeping: Hide public board until they join
-    document.getElementById('public-board-container').classList.add('hidden');
+    state.screen = 'selector';
+    sections.home.classList.remove('hidden');
     sections.form.classList.add('hidden');
     sections.board.classList.add('hidden');
 }
 
-function showForm() {
-    document.getElementById('home-dashboard').classList.add('hidden');
-    document.getElementById('public-board-container').classList.add('hidden');
+function showForm(mode = 'create') {
+    state.screen = 'form';
+    state.formMode = mode;
+    sections.home.classList.add('hidden');
     sections.form.classList.remove('hidden');
     sections.board.classList.add('hidden');
 
-    const title = state.direction === 'hostel' ? 'Details: Going to Hostel' : 'Details: Going to Airport';
-    const timeLabel = state.direction === 'hostel' ? 'Landing Time @ BLR' : 'Pickup Time @ Campus';
+    const isHostel = state.direction === 'hostel';
+    const editing = mode === 'edit';
 
-    document.getElementById('form-title').textContent = title;
-    document.getElementById('time-label').textContent = timeLabel;
+    document.getElementById('form-eyebrow').textContent = editing ? 'Change your trip' : 'Step 2 of 2';
+    document.getElementById('form-title').textContent = isHostel ? 'Airport → Hostel' : 'Hostel → Airport';
+    document.getElementById('time-label').textContent = isHostel ? 'Landing time at BLR' : 'Pickup time at campus';
+    document.getElementById('trip-submit-label').textContent = editing ? 'Save changes' : 'Post my trip';
+    setStatus(document.getElementById('trip-status'), '', 'neutral');
+    inputs.time.min = istInputNow();
+
+    if (editing && state.myRequest) {
+        inputs.time.value = isoToIstInput(state.myRequest.time);
+        inputs.flight.value = state.myRequest.flightCode || '';
+        inputs.wait.value = String(state.myRequest.waitMinutes || 30);
+    } else {
+        inputs.time.value = '';
+        inputs.flight.value = '';
+        inputs.wait.value = '30';
+    }
 }
 
 function showBoard() {
-    document.getElementById('home-dashboard').classList.add('hidden');
-    document.getElementById('public-board-container').classList.remove('hidden');
+    state.screen = 'board';
+    sections.home.classList.add('hidden');
     sections.form.classList.add('hidden');
     sections.board.classList.remove('hidden');
-    // startDashboardServices is called by showDashboard
+}
+
+function renderProfile() {
+    document.getElementById('user-usn').textContent = state.name || state.usn || 'Student';
+    document.getElementById('user-email').textContent = state.email || '';
+
+    const avatar = document.getElementById('user-avatar');
+    const photo = safePhotoUrl(state.photo);
+    avatar.replaceChildren();
+
+    if (photo) {
+        const img = document.createElement('img');
+        img.src = photo;
+        img.alt = '';
+        img.className = 'avatar-img';
+        img.addEventListener('error', () => {
+            avatar.replaceChildren();
+            avatar.textContent = initials();
+        });
+        avatar.appendChild(img);
+    } else {
+        avatar.textContent = initials();
+    }
+}
+
+function initials() {
+    const name = (state.name || '').trim();
+    if (name) return name.slice(0, 1).toUpperCase();
+    return String(state.usn || 'U').slice(-2);
 }
 
 // Auth Handlers
@@ -134,54 +281,55 @@ forms.login.addEventListener('submit', async (e) => {
     const usn = inputs.usn.value.trim();
     if (!usn) return;
 
-    const btn = forms.login.querySelector('button');
+    const btn = forms.login.querySelector('button[type="submit"]');
     btn.disabled = true;
     setStatus(status.login, 'Finding student...', 'neutral');
 
     try {
-        const res = await fetch(`${API_BASE}/request-otp`, {
+        const data = await api('/request-otp', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usn })
         });
-        const data = await res.json();
 
-        if (data.success) {
-            state.usn = usn;
-            setStatus(status.login, '', 'neutral');
-            document.getElementById('email-hint').textContent = data.message.split('to ')[1] || '...';
-            forms.login.classList.remove('active');
-            forms.otp.classList.add('active');
-            startResendTimer();
-        } else {
-            setStatus(status.login, data.error || 'Student not found', 'error');
-        }
+        state.usn = usn;
+        setStatus(status.login, '', 'neutral');
+        document.getElementById('email-hint').textContent = data.emailHint || 'your official email';
+        forms.login.classList.remove('active');
+        forms.otp.classList.add('active');
+        inputs.otp.value = '';
+        inputs.otp.focus();
+        startResendTimer();
     } catch (err) {
-        setStatus(status.login, 'Network Error', 'error');
+        setStatus(status.login, err.message || 'Could not send the code', 'error');
     } finally {
         btn.disabled = false;
     }
 });
 
 function startResendTimer() {
-    state.resendTimer = 30;
+    stopResendTimer();
+    state.resendSeconds = 30;
+
     const btn = document.getElementById('resend-otp-btn');
     const timerDisplay = document.getElementById('resend-timer');
-
     btn.disabled = true;
+    timerDisplay.textContent = `(${state.resendSeconds}s)`;
 
-    if (window.resendInterval) clearInterval(window.resendInterval);
+    state.resendTimer = setInterval(() => {
+        state.resendSeconds -= 1;
+        timerDisplay.textContent = `(${state.resendSeconds}s)`;
 
-    window.resendInterval = setInterval(() => {
-        state.resendTimer -= 1;
-        timerDisplay.textContent = `(${state.resendTimer}s)`;
-
-        if (state.resendTimer <= 0) {
-            clearInterval(window.resendInterval);
+        if (state.resendSeconds <= 0) {
+            stopResendTimer();
             timerDisplay.textContent = '';
             btn.disabled = false;
         }
     }, 1000);
+}
+
+function stopResendTimer() {
+    if (state.resendTimer) clearInterval(state.resendTimer);
+    state.resendTimer = null;
 }
 
 document.getElementById('resend-otp-btn').addEventListener('click', async () => {
@@ -190,22 +338,15 @@ document.getElementById('resend-otp-btn').addEventListener('click', async () => 
     setStatus(status.otp, 'Resending OTP...', 'neutral');
 
     try {
-        const res = await fetch(`${API_BASE}/request-otp`, {
+        const data = await api('/request-otp', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usn: state.usn })
         });
-        const data = await res.json();
-
-        if (data.success) {
-            setStatus(status.otp, 'OTP Resent!', 'neutral');
-            startResendTimer();
-        } else {
-            setStatus(status.otp, data.error, 'error');
-            btn.disabled = false;
-        }
+        if (data.emailHint) document.getElementById('email-hint').textContent = data.emailHint;
+        setStatus(status.otp, 'OTP resent.', 'success');
+        startResendTimer();
     } catch (err) {
-        setStatus(status.otp, 'Failed to resend OTP', 'error');
+        setStatus(status.otp, err.message || 'Failed to resend OTP', 'error');
         btn.disabled = false;
     }
 });
@@ -215,45 +356,54 @@ forms.otp.addEventListener('submit', async (e) => {
     const otp = inputs.otp.value.trim();
     if (!otp) return;
 
+    const btn = forms.otp.querySelector('button[type="submit"]');
+    btn.disabled = true;
     setStatus(status.otp, 'Verifying...', 'neutral');
 
     try {
-        const res = await fetch(`${API_BASE}/verify-otp`, {
+        const data = await api('/verify-otp', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usn: state.usn, otp })
         });
-        const data = await res.json();
 
-        if (data.success) {
-            state.token = data.token;
-            state.email = data.email;
-            state.name = data.name;
-            state.photo = data.photo;
+        state.token = data.token;
+        state.email = data.email || '';
+        state.name = data.name || '';
+        state.photo = data.photo || '';
 
-            localStorage.setItem('cp_token', state.token);
-            localStorage.setItem('cp_usn', state.usn);
-            localStorage.setItem('cp_email', state.email);
-            if (state.name) localStorage.setItem('cp_name', state.name);
-            if (state.photo) localStorage.setItem('cp_photo', state.photo);
+        localStorage.setItem('cp_token', state.token);
+        localStorage.setItem('cp_usn', state.usn);
+        localStorage.setItem('cp_email', state.email);
+        localStorage.setItem('cp_name', state.name);
+        localStorage.setItem('cp_photo', state.photo);
 
-            showDashboard();
-        } else {
-            setStatus(status.otp, data.error, 'error');
-        }
+        stopResendTimer();
+        setStatus(status.otp, '', 'neutral');
+        showDashboard();
     } catch (err) {
-        setStatus(status.otp, 'Verification failed', 'error');
+        if (err.message !== 'session-expired') {
+            setStatus(status.otp, err.message || 'Verification failed', 'error');
+        }
+    } finally {
+        btn.disabled = false;
     }
 });
 
 document.getElementById('back-to-login').addEventListener('click', () => {
+    stopResendTimer();
+    setStatus(status.otp, '', 'neutral');
     forms.otp.classList.remove('active');
     forms.login.classList.add('active');
 });
 
-document.getElementById('logout-btn').addEventListener('click', () => {
-    localStorage.clear();
-    state = { token: null, usn: null, email: null, direction: null, requestId: null };
+document.getElementById('logout-btn').addEventListener('click', async () => {
+    stopPolling();
+    try {
+        await api('/logout', { method: 'POST' });
+    } catch {
+        // Session may already be gone server-side; clearing locally is enough.
+    }
+    clearCarpoolStorage();
     location.reload();
 });
 
@@ -266,441 +416,429 @@ document.querySelectorAll('.trip-card').forEach(card => {
 });
 
 document.getElementById('back-to-selection').addEventListener('click', () => {
-    showSelector();
+    if (state.myRequest) {
+        showBoard();
+    } else {
+        showSelector();
+    }
+});
+
+document.getElementById('edit-request-btn').addEventListener('click', () => {
+    if (!state.myRequest) return;
+    state.direction = state.myRequest.direction;
+    showForm('edit');
 });
 
 forms.trip.addEventListener('submit', async (e) => {
     e.preventDefault();
 
-    const payload = {
-        direction: state.direction,
-        time: inputs.time.value,
-        flightCode: inputs.flight.value,
-        waitMinutes: inputs.wait.value
-    };
+    const tripStatus = document.getElementById('trip-status');
+    const isoTime = istInputToIso(inputs.time.value);
+    if (!isoTime) {
+        setStatus(tripStatus, 'Pick a valid date and time', 'error');
+        return;
+    }
 
     const btn = forms.trip.querySelector('button[type="submit"]');
-    const originalText = btn.innerHTML;
+    const label = document.getElementById('trip-submit-label');
+    const original = label.textContent;
     btn.disabled = true;
-    btn.innerHTML = '<span>Joining...</span>';
+    label.textContent = state.formMode === 'edit' ? 'Saving...' : 'Posting...';
+    setStatus(tripStatus, '', 'neutral');
 
     try {
-        const res = await fetch(`${API_BASE}/requests`, {
+        const data = await api('/requests', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${state.token}`
-            },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({
+                direction: state.direction,
+                time: isoTime,
+                flightCode: inputs.flight.value,
+                waitMinutes: inputs.wait.value
+            })
         });
-        const data = await res.json();
 
-        if (data.success) {
-            state.requestId = data.requestId;
-            state.requestTime = payload.time;
-            localStorage.setItem('cp_req_id', state.requestId);
-            localStorage.setItem('cp_req_time', state.requestTime);
+        state.myRequest = data.request || null;
+        acceptedMatches.clear();
+        lastMatchesSignature = null;
+        lastBoardSignature = null;
+        if (state.myRequest) {
+            renderTripHead(state.myRequest);
             showBoard();
-        } else {
-            alert(data.error);
         }
+        await refreshOverview();
     } catch (err) {
-        alert('Failed to create request');
+        if (err.message !== 'session-expired') {
+            setStatus(tripStatus, err.message || 'Failed to create request', 'error');
+        }
     } finally {
         btn.disabled = false;
-        btn.innerHTML = originalText;
+        label.textContent = original;
     }
 });
 
 document.getElementById('cancel-request-btn').addEventListener('click', async () => {
-    if (!state.requestId) return;
-
     const btn = document.getElementById('cancel-request-btn');
-    const originalText = btn.textContent;
+    const original = btn.textContent;
     btn.textContent = 'Cancelling...';
     btn.disabled = true;
 
     try {
-        const res = await fetch(`${API_BASE}/cancel`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${state.token}`
-            },
-            body: JSON.stringify({ requestId: state.requestId })
-        });
-
-        if (res.ok) {
-            state.requestId = null;
-            state.requestTime = null;
-            localStorage.removeItem('cp_req_id');
-            localStorage.removeItem('cp_req_time');
-            showSelector();
-        } else {
-            alert('Failed to cancel request on server');
+        await api('/cancel', { method: 'POST' });
+        state.myRequest = null;
+        acceptedMatches.clear();
+        lastMatchesSignature = null;
+        lastBoardSignature = null;
+        showSelector();
+        await refreshOverview();
+    } catch (err) {
+        if (err.message !== 'session-expired') {
+            alert(err.message || 'Could not cancel your journey');
         }
-    } catch (e) {
-        alert('Network error during cancellation');
     } finally {
-        btn.textContent = originalText;
+        btn.textContent = original;
         btn.disabled = false;
     }
 });
 
-
-// Matching/Board Logic
-window.refreshStatus = async function () {
-    console.log("Manual refresh triggered...");
-    const btn = event?.currentTarget;
-    if (btn) btn.classList.add('rotating');
-
-    await fetchInitialData();
-
-    if (btn) setTimeout(() => btn.classList.remove('rotating'), 500);
-}
-
-function startDashboardServices() {
-    console.log("Services starting...");
-
-    // Initial Load
-    fetchInitialData();
-
-    // SSE for Real-time
-    if (window.cpEventSource) window.cpEventSource.close();
-
-    // EventSource doesn't support headers, but we can use a query param or just rely on the fact 
-    // that public requests are mostly public anyway if you have a token.
-    // However, the backend doesn't check token for stream.
-    window.cpEventSource = new EventSource(`${API_BASE}/stream`);
-
-    window.cpEventSource.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            console.log("Live update received");
-
-            if (data.publicRequests) {
-                renderPublicBoard(data.publicRequests);
-                if (state.requestId) {
-                    const myReq = data.publicRequests.find(r => r.id === state.requestId);
-                    if (myReq) renderMyRequest(myReq);
-                }
-            }
-
-            // If match count changed or matches provided, refresh our specific matches
-            if (state.requestId) {
-                fetchMatches();
-            }
-        } catch (e) {
-            console.error("Stream parse error", e);
-        }
-    };
-
-    window.cpEventSource.onerror = () => {
-        console.warn("Stream connection lost. Retrying...");
-        window.cpEventSource.close();
-        setTimeout(startDashboardServices, 5000);
-    };
-}
-
-async function fetchInitialData() {
+// Live data
+document.getElementById('refresh-board-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.classList.add('rotating');
     try {
-        await Promise.all([
-            fetchPublicRequests(),
-            state.requestId ? fetchMatches() : Promise.resolve()
-        ]);
-    } catch (e) {
-        console.error("Initial load failed", e);
+        await refreshOverview();
+    } finally {
+        setTimeout(() => btn.classList.remove('rotating'), 500);
+    }
+});
+
+function startPolling() {
+    stopPolling();
+    refreshOverview();
+    // Plain polling: EventSource cannot send an Authorization header, and the
+    // serverless host drops long-lived streams anyway.
+    state.pollTimer = setInterval(() => {
+        if (!document.hidden) refreshOverview();
+    }, POLL_MS);
+}
+
+function stopPolling() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = null;
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.token) refreshOverview();
+});
+
+async function refreshOverview() {
+    if (!state.token) return;
+    try {
+        applyOverview(await api('/overview'));
+    } catch (err) {
+        if (err.message !== 'session-expired') console.error('Board refresh failed:', err);
     }
 }
 
-async function fetchPublicRequests() {
-    try {
-        const res = await fetch(`${API_BASE}/public-requests`, {
-            headers: { 'Authorization': `Bearer ${state.token}` }
-        });
-        if (res.ok) {
-            const data = await res.json();
+function applyOverview(data) {
+    state.myRequest = data.myRequest || null;
 
-            if (data.locked) {
-                // Stale or missing request on server
-                if (state.requestId) {
-                    state.requestId = null;
-                    localStorage.removeItem('cp_req_id');
-                    showSelector();
-                }
-            }
+    const total = data.activeRequests ?? 0;
+    setText('public-count', total);
+    setText('pick-count', total);
 
-            const reqs = data.requests || [];
-            renderPublicBoard(reqs);
-
-            if (state.requestId) {
-                const myReq = reqs.find(r => r.id === state.requestId);
-                if (myReq) {
-                    state.requestTime = myReq.time;
-                    renderMyRequest(myReq);
-                }
-            }
-        }
-    } catch (e) {
-        console.error('Public board error', e);
+    if (state.myRequest) {
+        const matches = data.matches || [];
+        const requests = data.requests || [];
+        setText('match-count', matches.length);
+        renderTripHead(state.myRequest);
+        renderRail(state.myRequest, matches, requests);
+        renderBoard(requests);
+        renderMatches(matches);
+        // Don't yank the student out of a form they are filling in.
+        if (state.screen !== 'form') showBoard();
+    } else {
+        if (state.screen !== 'form') showSelector();
     }
 }
 
-function renderMyRequest(r) {
-    const card = document.getElementById('my-request-card');
-    if (!card) return;
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
 
-    const date = new Date(r.time);
-    const timeOptions = { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true };
-    const dateOptions = { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' };
+function initial(name) {
+    return String(name || '?').trim().slice(0, 1).toUpperCase();
+}
 
-    const timeStr = date.toLocaleTimeString('en-IN', timeOptions);
-    const dateStr = date.toLocaleDateString('en-IN', dateOptions);
+function faceMarkup(person, className) {
+    const photo = safePhotoUrl(person.photo);
+    if (photo) {
+        return `<span class="${className}"><img src="${escapeHtml(photo)}" alt=""></span>`;
+    }
+    return `<span class="${className}">${escapeHtml(initial(person.name))}</span>`;
+}
 
-    const isAirport = r.direction === 'airport';
-    const icon = isAirport ? '✈️' : '🏠';
-    const label = isAirport ? 'Heading to Airport' : 'Coming to Hostel';
+function renderTripHead(mine) {
+    const arriving = mine.direction === 'hostel';
+    setText('rail-eyebrow', arriving ? 'Arriving at BLR' : 'Departing for BLR');
 
-    card.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-            <div>
-                <div style="font-size: 0.75rem; color: var(--primary-light); font-weight: 900; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 1.5px; display:flex; align-items:center; gap:6px;">
-                    <span style="font-size:1.2rem;">${icon}</span> ${label}
-                </div>
-                <div style="font-size: 2.25rem; font-weight: 900; color: white; line-height: 1; margin-bottom: 8px; letter-spacing: -1px;">
-                    ${timeStr}
-                </div>
-                <div style="font-size: 0.95rem; color: var(--text-muted); font-weight: 600;">
-                    ${dateStr}${r.flightCode && r.flightCode !== 'No Flight #' ? ' • <span style="color:var(--primary-light)">' + r.flightCode + '</span>' : ''}
-                </div>
-            </div>
-            <div style="text-align: right;">
-                <div class="badge-live">Live Tracking</div>
-            </div>
+    const timeEl = document.getElementById('rail-time');
+    if (timeEl) timeEl.innerHTML = timeHtml(mine.time);
+
+    const meta = document.getElementById('rail-meta');
+    if (!meta) return;
+    const flight = mine.flightCode
+        ? ` &middot; <span class="mono">${escapeHtml(mine.flightCode)}</span>`
+        : '';
+    meta.innerHTML = `${escapeHtml(formatDateLong(mine.time))}${flight}`;
+}
+
+const PLANE_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="26" height="26" aria-hidden="true">
+    <path d="M21.6 12c0 .62-.5 1.06-1.16 1.08l-5.03.18-3.2 5.42c-.19.32-.53.52-.9.52H9.6l1.55-6.03-4.05.15-1.45 2.05c-.14.2-.37.32-.61.32H3.6l1.06-3.69L3.6 8.31h1.44c.24 0 .47.12.61.32L7.1 10.68l4.05.15L9.6 4.8h1.71c.37 0 .71.2.9.52l3.2 5.42 5.03.18c.66.02 1.16.46 1.16 1.08z"/>
+</svg>`;
+
+/* The rail: your time at centre, your wait tolerance as a lit band, and
+   everyone heading the same way pinned by how far off they are. */
+function renderRail(mine, matches, requests) {
+    const rail = document.getElementById('rail');
+    if (!rail) return;
+
+    const tolerance = Number(mine.waitMinutes) || 30;
+    const span = Math.max(60, tolerance * 2);
+    const myTime = new Date(mine.time).getTime();
+    const matchedIds = new Set(matches.map(m => m.requestId).filter(Boolean));
+
+    const pos = (mins) => 50 + (mins / span) * 50;
+
+    const neighbours = requests
+        .filter(r => !r.isYou && r.direction === mine.direction)
+        .map(r => ({ ...r, delta: Math.round((new Date(r.time).getTime() - myTime) / 60000) }))
+        .filter(r => Math.abs(r.delta) <= span)
+        .sort((a, b) => a.delta - b.delta);
+
+    const bandLeft = pos(-tolerance);
+    const bandWidth = pos(tolerance) - bandLeft;
+
+    const pins = neighbours.map(n => {
+        const matched = matchedIds.has(n.id);
+        const sign = n.delta > 0 ? '+' : '';
+        const title = `${n.name} · ${formatTime(n.time)} · ${sign}${n.delta} min`;
+        return `
+            <span class="rail-pin ${matched ? 'is-match' : 'is-near'}"
+                  style="left:${pos(n.delta).toFixed(2)}%"
+                  title="${escapeHtml(title)}">
+                ${faceMarkup(n, 'pin-dot')}
+            </span>`;
+    }).join('');
+
+    // Ruler ticks give the axis texture even when nobody else is on it.
+    const step = span >= 90 ? 30 : 15;
+    let ticks = '';
+    for (let m = -span; m <= span; m += step) {
+        if (m === 0) continue;
+        ticks += `<span class="rail-tick" style="left:${pos(m).toFixed(2)}%"></span>`;
+    }
+
+    rail.innerHTML = `
+        <div class="rail-glow" style="left:${bandLeft.toFixed(2)}%;width:${bandWidth.toFixed(2)}%"></div>
+        <div class="rail-axis"></div>
+        ${ticks}
+        <span class="rail-gate" style="left:${bandLeft.toFixed(2)}%"></span>
+        <span class="rail-gate" style="left:${(bandLeft + bandWidth).toFixed(2)}%"></span>
+        ${pins}
+        <span class="rail-pin is-you" style="left:50%">
+            <span class="pin-label">You</span>
+            <span class="pin-plane">${PLANE_SVG}</span>
+        </span>
+        <div class="rail-dim" style="left:${bandLeft.toFixed(2)}%;width:${bandWidth.toFixed(2)}%">
+            <span class="rail-dim-label">&plusmn;${tolerance} min window</span>
+        </div>
+        <div class="rail-scale">
+            <span class="at-start">&minus;${span} min</span>
+            <span class="at-mid">${escapeHtml(formatTime(mine.time))}</span>
+            <span class="at-end">+${span} min</span>
         </div>
     `;
+
+    const legend = document.getElementById('rail-legend');
+    if (!legend) return;
+
+    const inWindow = matches.length;
+    const nearby = neighbours.length - inWindow;
+
+    if (inWindow > 0) {
+        legend.innerHTML = `<strong>${inWindow} ${inWindow === 1 ? 'match' : 'matches'}</strong> inside your `
+            + `${tolerance}-minute window${nearby > 0 ? `, and ${nearby} just outside it` : ''}.`;
+    } else if (nearby > 0) {
+        legend.innerHTML = `No matches yet. <strong>${nearby}</strong> `
+            + `${nearby === 1 ? 'student is' : 'students are'} travelling nearby but outside your `
+            + `${tolerance}-minute window.`;
+    } else {
+        legend.innerHTML = `You're on the board. We'll pin anyone heading the same way within `
+            + `<strong>${tolerance} minutes</strong> of you.`;
+    }
 }
 
-function renderPublicBoard(requests) {
+function renderBoard(requests) {
     const list = document.getElementById('public-board-list');
-    const countEl = document.getElementById('public-count');
     if (!list) return;
 
-    if (countEl) countEl.textContent = requests.length;
+    const sorted = [...requests].sort((a, b) => new Date(a.time) - new Date(b.time));
+    const signature = JSON.stringify(sorted.map(r => [r.id, r.time, r.name, r.direction, r.flightCode]));
+    if (signature === lastBoardSignature) return;
+    lastBoardSignature = signature;
 
-    // Gatekeeping check - double safety
-    if (!state.requestId) {
+    if (!sorted.length) {
         list.innerHTML = `
-            <div class="empty-state" style="padding:40px 20px;">
-                <div style="font-size:32px; margin-bottom:10px;">🔒</div>
-                <div style="font-weight:600; color:white;">Board Locked</div>
-                <div style="font-size:0.85rem; opacity:0.7; margin-top:5px;">
-                    Submit your journey details above to see who's traveling!
-                </div>
-            </div>
-        `;
+            <div class="empty">
+                <p class="empty-title">Nobody else yet</p>
+                <p class="empty-text">You're first on the board. We'll add students as they post their trips.</p>
+            </div>`;
         return;
     }
 
-    list.innerHTML = '';
-
-    if (requests.length === 0) {
-        list.innerHTML = `<div class="empty-state" style="color:#aaa; text-align:center; padding:15px;">No active travelers right now. Be the first!</div>`;
-        return;
-    }
-
-    requests.sort((a, b) => new Date(a.time) - new Date(b.time));
-
-    const timeOptions = { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true };
-    const dateOptions = { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' };
-
-    requests.forEach(r => {
-        const date = new Date(r.time);
-        const timeStr = date.toLocaleTimeString('en-IN', timeOptions);
-        const dateStr = date.toLocaleDateString('en-IN', dateOptions);
-
-        const isAirport = r.direction === 'airport';
-        const icon = isAirport ? '✈️' : '🏠';
-        const directionLabel = isAirport ? 'To Airport' : 'To Hostel';
-
-        const card = document.createElement('div');
-        card.className = 'match-item'; // Reuse styling
-        card.style.background = 'rgba(255, 255, 255, 0.03)';
-        // Color code based on direction
-        card.style.borderLeft = isAirport ? '4px solid var(--neon-purple)' : '4px solid var(--success)';
-
-        card.innerHTML = `
-            <div class="match-header" style="align-items: center;">
-                <div style="display:flex; align-items:center; gap:10px;">
-                    <img src="${r.photo || ''}" onerror="this.style.display='none'" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
-                    <div>
-                        <div style="font-weight:bold; color:white; font-size:0.95rem;">${r.name}</div>
-                        <div class="match-flight" style="font-size:0.8rem; opacity:0.8;">${icon} ${directionLabel}${r.flightCode && r.flightCode !== 'No Flight #' ? ' • ' + r.flightCode : ''}</div>
+    list.innerHTML = sorted.map(r => {
+        const arriving = r.direction === 'hostel';
+        return `
+            <div class="board-row ${arriving ? 'to-hostel' : 'to-airport'}${r.isYou ? ' is-you' : ''}">
+                ${faceMarkup(r, 'board-face')}
+                <div class="board-body">
+                    <div class="board-name">
+                        ${escapeHtml(r.name)}${r.isYou ? '<span class="tag-you">You</span>' : ''}
+                    </div>
+                    <div class="board-dir">
+                        ${arriving ? 'To hostel' : 'To airport'}${r.flightCode ? ` &middot; ${escapeHtml(r.flightCode)}` : ''}
                     </div>
                 </div>
-                <div class="match-time" style="text-align:right;">
-                    <div style="font-weight:600; color:var(--primary-light);">${timeStr}</div>
-                    <div style="font-size:0.75rem; opacity:0.6;">${dateStr}</div>
+                <div class="board-when">
+                    <div class="board-time">${timeHtml(r.time)}</div>
+                    <div class="board-date">${escapeHtml(formatDate(r.time))}</div>
                 </div>
-            </div>
-        `;
-        list.appendChild(card);
-    });
+            </div>`;
+    }).join('');
 }
-
-async function fetchMatches() {
-    if (!state.requestId) return;
-    try {
-        const res = await fetch(`${API_BASE}/matches`, {
-            headers: { 'Authorization': `Bearer ${state.token}` }
-        });
-
-        if (res.status === 401) {
-            localStorage.clear();
-            location.reload();
-            return;
-        }
-
-        const data = await res.json();
-        renderMatches(data.matches);
-    } catch (err) {
-        console.error('Polling error', err);
-    }
-}
-
 
 const funnyMessages = {
     userWaiting: [
-        (user, match, mins) => `Hey ${user}, you've got ${mins} mins! Grab a Chole Bhature till ${match} arrives. 🥘`,
-        (user, match, mins) => `Perfect! You can scroll Reels for ${mins} mins while ${match} lands. 📱`,
-        (user, match, mins) => `${match} is joining you in ${mins} mins! Stay hydrated, ${user}. 🥤`,
-        (user, match, mins) => `You've got ${mins} mins! Maybe a quick power nap before ${match} shows up? 😴`,
-        (user, match, mins) => `Tell ${match} you're waiting! You've got ${mins} mins to kill. ⏳`
+        (user, match, mins) => `You land first. ${mins} minutes to grab a chai before ${match} shows up.`,
+        (user, match, mins) => `${mins} minutes of reels while you wait on ${match}.`,
+        (user, match, mins) => `${match} is ${mins} minutes behind you. Worth the wait to split the fare.`,
+        (user, match, mins) => `You're early by ${mins} minutes. Find a charging point, ${user}.`,
+        (user, match, mins) => `${mins} minutes ahead of ${match}. Pick the pickup point and tell them.`
     ],
     matchWaiting: [
-        (user, match, mins) => `${match} is early! Tell them to grab Chole Bhature for ${mins} mins till you arrive. 🥘`,
-        (user, match, mins) => `${match} has ${mins} mins to scroll Reels while you land. 📱`,
-        (user, match, mins) => `Don't rush, ${user}! ${match} is early and waiting ${mins} mins for you. 🧘`,
-        (user, match, mins) => `${match} is already there! They've got ${mins} mins to count floor tiles. 🔢`,
-        (user, match, mins) => `Hey ${user}, ${match} is early. Tell them to find a charging point for ${mins} mins! ⚡`
+        (user, match, mins) => `${match} gets there ${mins} minutes before you and is happy to wait.`,
+        (user, match, mins) => `${match} is early by ${mins} minutes. Tell them where to stand.`,
+        (user, match, mins) => `No rush, ${user}. ${match} has ${mins} minutes to kill.`,
+        (user, match, mins) => `${match} lands ${mins} minutes ahead. They'll hold the cab.`,
+        (user, match, mins) => `${mins} minutes earlier than you, and still willing to share.`
     ]
 };
 
-function getFunnyMessage(matchFullName, matchTimeStr) {
+function getFunnyMessage(match) {
     const user = (state.name || 'Student').split(' ')[0];
-    const match = matchFullName.split(' ')[0];
+    const other = String(match.name || 'Someone').split(' ')[0];
+    const mins = Math.abs(Number(match.gapMinutes) || 0);
 
-    // Safety check: if timestamps are missing, avoid epoch-based huge numbers
-    if (!state.requestTime || !matchTimeStr) {
-        const index = Math.floor(Math.random() * funnyMessages.userWaiting.length);
-        return funnyMessages.userWaiting[index](user, match, 15);
-    }
+    if (mins === 0) return `Same time, same direction. Split it with ${other}.`;
 
-    const myTime = new Date(state.requestTime);
-    const otherTime = new Date(matchTimeStr);
-
-    // Calculate difference in minutes
-    let diffMins = Math.round(Math.abs(myTime - otherTime) / 60000);
-
-    // Bounds check to prevent absurdly large numbers (e.g. > 1 day)
-    if (diffMins > 1440 || isNaN(diffMins)) diffMins = 15;
-
-    // If other arrives LATER, I am waiting for them
-    const isUserWaiting = otherTime > myTime;
-    const pool = isUserWaiting ? funnyMessages.userWaiting : funnyMessages.matchWaiting;
-    const index = Math.floor(Math.random() * pool.length);
-
-    return pool[index](user, match, diffMins || 15);
+    const pool = Number(match.youWaitMinutes) > 0 ? funnyMessages.userWaiting : funnyMessages.matchWaiting;
+    return pool[seededIndex(String(match.id), pool.length)](user, other, mins);
 }
 
 function renderMatches(matches) {
     const list = document.getElementById('matches-list');
-    list.innerHTML = '';
+    if (!list) return;
 
-    if (matches.length === 0) {
-        const inputVal = inputs.time.value;
-        let displayTime = 'your time';
-        if (inputVal) {
-            const date = new Date(inputVal + '+05:30');
-            displayTime = date.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
-        }
-        list.innerHTML = `<div class="empty-state" style="color:#888; text-align:center; padding:20px;">No exact matches yet.<br>We'll notify you when someone lands near ${displayTime}.</div>`;
+    const rows = Array.isArray(matches) ? matches : [];
+    const signature = JSON.stringify([rows.map(m => [m.id, m.time, m.name]), [...acceptedMatches]]);
+    if (signature === lastMatchesSignature) return;
+    lastMatchesSignature = signature;
+
+    if (!rows.length) {
+        const when = state.myRequest ? formatTime(state.myRequest.time) : 'your time';
+        list.innerHTML = `
+            <div class="empty">
+                <p class="empty-title">No matches yet</p>
+                <p class="empty-text">
+                    We're watching for anyone heading your way near
+                    <span class="mono">${escapeHtml(when)}</span>. This board updates on its own.
+                </p>
+            </div>`;
         return;
     }
 
-    const timeOptions = { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true };
+    list.innerHTML = rows.map(m => {
+        const sent = acceptedMatches.has(m.id);
+        const firstName = String(m.name || 'them').split(' ')[0];
+        const gap = Math.abs(Number(m.gapMinutes) || 0);
+        const gapText = gap === 0 ? 'Same time' : `${gap} min apart`;
 
-    matches.forEach(m => {
-        const date = new Date(m.time);
-        const timeStr = date.toLocaleTimeString('en-IN', timeOptions);
-        const funnyNote = getFunnyMessage(m.name, m.time);
-
-        const el = document.createElement('div');
-        el.className = 'match-item';
-        el.innerHTML = `
-            <div class="match-header" style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
-                <div style="flex:1;">
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-                        <span style="font-weight:800; color:white; font-size:1.15rem; letter-spacing:-0.5px;">${m.name}</span>
-                        <span class="badge-match">Match</span>
+        return `
+            <article class="match">
+                <div class="match-top">
+                    <div class="match-who">
+                        ${faceMarkup(m, 'board-face')}
+                        <div>
+                            <div class="match-name">${escapeHtml(m.name)}</div>
+                            <div class="match-sub">
+                                <span>${m.direction === 'hostel' ? 'To hostel' : 'To airport'}</span>
+                                ${m.flightCode ? `<span class="mono">${escapeHtml(m.flightCode)}</span>` : ''}
+                            </div>
+                        </div>
                     </div>
-                    <div style="font-size: 0.9rem; color: var(--text-muted); line-height:1.4; border-left: 2px solid var(--primary-light); padding-left:12px; margin-top:10px;">
-                        "${funnyNote}"
+                    <div class="match-when">
+                        <div class="match-time">${timeHtml(m.time)}</div>
+                        <div class="match-gap">${escapeHtml(gapText)}</div>
                     </div>
                 </div>
-                <div style="text-align:right;">
-                    <div style="color: var(--primary-light); font-weight:900; font-size:1.35rem; line-height:1;">${timeStr}</div>
-                    <div style="font-size:0.7rem; opacity:0.6; font-weight:700; text-transform:uppercase; margin-top:6px; letter-spacing:1px;">
-                        ${m.direction}
-                    </div>
-                </div>
-            </div>
-            <div class="match-actions" style="margin-top:24px;">
-                <button class="btn-small btn-premium-neon" style="width:100%; border-radius:14px;" onclick="acceptMatch('${m.id}')">
-                    <span>Connect with ${m.name.split(' ')[0]}</span>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                        <path d="M5 12h14M12 5l7 7-7 7"/>
-                    </svg>
+
+                <p class="match-note">${escapeHtml(getFunnyMessage(m))}</p>
+
+                <button class="btn ${sent ? 'btn-quiet' : 'btn-primary'} btn-connect${sent ? ' is-sent' : ''}"
+                        data-match-id="${escapeHtml(m.id)}"${sent ? ' disabled' : ''}>
+                    <span class="btn-label">${sent ? 'Introduction sent' : `Share my details with ${escapeHtml(firstName)}`}</span>
                 </button>
-            </div>
-        `;
-        list.appendChild(el);
-    });
+            </article>`;
+    }).join('');
 }
 
-window.acceptMatch = async (matchId) => {
-    const btn = event.target;
-    btn.textContent = 'Sending...';
+document.getElementById('matches-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-match-id]');
+    if (btn && !btn.disabled) acceptMatch(btn);
+});
+
+async function acceptMatch(btn) {
+    const matchId = btn.dataset.matchId;
+    const label = btn.querySelector('.btn-label') || btn;
+    const original = label.textContent;
     btn.disabled = true;
+    label.textContent = 'Sending...';
 
     try {
-        const res = await fetch(`${API_BASE}/accept`, {
+        await api('/accept', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${state.token}`
-            },
             body: JSON.stringify({ matchId })
         });
-        const data = await res.json();
-        if (data.success) {
-            btn.textContent = 'Email Sent!';
-            btn.style.background = '#00ff88';
-            btn.style.color = '#000';
-        } else {
-            btn.textContent = 'Failed';
-            btn.disabled = false;
-        }
-    } catch (e) {
-        btn.textContent = 'Error';
+        acceptedMatches.add(matchId);
+        label.textContent = 'Email sent!';
+        btn.classList.add('is-sent');
+    } catch (err) {
+        if (err.message === 'session-expired') return;
+        label.textContent = err.message || 'Failed';
+        btn.disabled = false;
+        setTimeout(() => { label.textContent = original; }, 2500);
     }
-};
-
-// Utilities
-function setStatus(el, msg, type) {
-    el.textContent = msg;
-    el.className = `status-msg ${type}`;
 }
 
 // Start
+function init() {
+    inputs.time.min = istInputNow();
+    if (state.token) {
+        showDashboard();
+    } else {
+        showAuth();
+    }
+}
+
 init();
