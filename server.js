@@ -360,17 +360,132 @@ async function claimMatchNotification(key, usns) {
     return true;
 }
 
-// Heads-up only: no contact details travel in this email. Those are shared
-// solely by the owner tapping Connect.
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[ch]);
+}
+
+// Indian mobiles are stored in a few shapes; normalise to a wa.me target.
+function whatsappNumber(raw) {
+    let digits = String(raw || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length === 10) digits = `91${digits}`;
+    if (digits.length === 12 && digits.startsWith('91')) return digits;
+    if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
+    return digits.length >= 11 && digits.length <= 15 ? digits : '';
+}
+
+function whatsappLink(recipient, other, match) {
+    const number = whatsappNumber(other.mobile);
+    if (!number) return '';
+
+    const where = match.direction === 'airport' ? 'to BLR airport' : 'to campus from BLR';
+    const message =
+        `Hi ${displayName(other).split(' ')[0]}! This is ${displayName(recipient).split(' ')[0]} from NST. ` +
+        `We're both heading ${where} around ${formatIstTime(other.time)}. Want to split a cab?`;
+
+    return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
+}
+
+function matchAlertHtml(recipient, other, match, heading) {
+    const wa = whatsappLink(recipient, other, match);
+    const initial = escapeHtml(displayName(other).trim().charAt(0).toUpperCase() || '?');
+    const arriving = match.direction === 'hostel';
+    const accent = arriving ? '#2C5F55' : '#97382C';
+
+    const avatar = other.photo && String(other.photo).startsWith('data:image')
+        ? `<img src="cid:carpool_match_photo" width="76" height="76" alt="" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
+        : `<div style="width:76px;height:76px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;margin:0 auto;text-align:center;line-height:76px;font-size:30px;font-weight:700;color:#ffffff;">${initial}</div>`;
+
+    const waButton = wa
+        ? `<tr><td style="padding:0 32px 8px 32px;" align="center">
+             <a href="${escapeHtml(wa)}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
+               Message ${escapeHtml(displayName(other).split(' ')[0])} on WhatsApp
+             </a>
+             <div style="font-size:12px;color:#8A8377;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
+           </td></tr>`
+        : `<tr><td style="padding:0 32px 8px 32px;" align="center">
+             <div style="font-size:13px;color:#8A8377;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
+           </td></tr>`;
+
+    const row = (label, value) => `
+        <tr>
+          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:13px;color:#8A8377;">${escapeHtml(label)}</td>
+          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:14px;color:#1C1E22;font-weight:600;text-align:right;font-family:'SF Mono',Menlo,monospace;">${escapeHtml(value)}</td>
+        </tr>`;
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
+
+        <tr><td style="background:${accent};padding:34px 32px 28px 32px;text-align:center;">
+          ${avatar}
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:16px 0 6px 0;">You have a ride match</div>
+          <div style="color:#ffffff;font-size:25px;font-weight:700;">${escapeHtml(displayName(other))}</div>
+          <div style="color:rgba(255,255,255,0.8);font-size:14px;margin-top:5px;">is travelling ${escapeHtml(heading)} with you</div>
+        </td></tr>
+
+        <tr><td style="padding:28px 32px 8px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">
+            ${row('Their time', formatIstTime(other.time) + (other.flightCode ? ` · ${other.flightCode}` : ''))}
+            ${row('Your time', formatIstTime(recipient.time) + (recipient.flightCode ? ` · ${recipient.flightCode}` : ''))}
+            ${row('Gap between you', `about ${match.gapMinutes} min`)}
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:24px 32px 6px 32px;" align="center">
+          <div style="font-size:15px;color:#5F594E;line-height:1.6;">Split the fare. Say hello and sort out a pickup point.</div>
+        </td></tr>
+
+        ${waButton}
+
+        <tr><td style="padding:22px 32px 30px 32px;" align="center">
+          <a href="${escapeHtml(process.env.PUBLIC_BASE_URL || '')}/carpool" style="font-size:13px;color:#9A6822;font-weight:600;text-decoration:none;">Open the carpool board &rarr;</a>
+        </td></tr>
+
+        <tr><td style="background:#F1EBDD;padding:18px 32px;text-align:center;border-top:1px solid #E7E0D0;">
+          <div style="font-size:11px;color:#8A8377;line-height:1.6;">
+            You're both on the NST Carpool board for the same trip, so we shared your numbers to let you arrange the ride.<br>
+            Cancel your trip on the board to stop these emails.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
 async function sendMatchAlert(recipient, other, match) {
     const heading = match.direction === 'airport'
         ? 'to BLR airport'
         : 'from BLR airport back to campus';
 
+    const attachments = [];
+    if (other.photo && String(other.photo).startsWith('data:image')) {
+        try {
+            attachments.push({
+                filename: 'match.jpg',
+                content: Buffer.from(String(other.photo).split(';base64,').pop(), 'base64'),
+                cid: 'carpool_match_photo'
+            });
+        } catch (e) {
+            console.error('Carpool match photo attach failed:', e);
+        }
+    }
+
+    const wa = whatsappLink(recipient, other, match);
+
     await mailer.sendMail({
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: recipient.email,
         subject: `NST Carpool: ${displayName(other)} is travelling near your time`,
+        attachments,
+        html: matchAlertHtml(recipient, other, match, heading),
         text: [
             `Hi ${displayName(recipient)},`,
             ``,
@@ -380,11 +495,9 @@ async function sendMatchAlert(recipient, other, match) {
             `Your time:  ${formatIstTime(recipient.time)}${recipient.flightCode ? ` (${recipient.flightCode})` : ''}`,
             `Gap between you: about ${match.gapMinutes} min`,
             ``,
-            `Open the carpool board to share your details with them:`,
-            `${process.env.PUBLIC_BASE_URL || ''}/carpool`,
+            wa ? `Message them on WhatsApp: ${wa}` : `Open the board to get in touch.`,
             ``,
-            `We haven't given either of you the other's contact details. That only`,
-            `happens when you tap Connect yourself.`,
+            `Board: ${process.env.PUBLIC_BASE_URL || ''}/carpool`,
             ``,
             `- NST Carpool`
         ].join('\n')
@@ -742,12 +855,14 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
 
         let name = `Student ${usn.slice(-4)}`;
         let photo = '';
+        let mobile = '';
         try {
             const students = await loadStudentsFromFirestore();
             const student = students?.find(s => s.usn === usn);
             if (student) {
                 name = student.name || name;
                 photo = student.photo || photo;
+                mobile = student.mobile_number || '';
             }
         } catch (e) {
             console.error("Failed to load student name/photo", e);
@@ -759,6 +874,7 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
             email: entry.email,
             name,
             photo,
+            mobile,
             expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
         });
         await carpoolDelete(CARPOOL_COLLECTIONS.otps, usn);
@@ -813,6 +929,7 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
             email: req.carpoolUser.email,
             name: req.carpoolUser.name,
             photo: req.carpoolUser.photo,
+            mobile: req.carpoolUser.mobile || '',
             direction,
             flightCode: sanitizeFlightCode(flightCode),
             time: travelTime,
@@ -1094,13 +1211,14 @@ module.exports = app;
 // Deliberately gated: this mints carpool sessions and must never load in production.
 if (process.env.CARPOOL_TEST_HOOKS === '1') {
     module.exports.__test = {
-        async mintTestSession({ usn, email, name, photo = '' }) {
+        async mintTestSession({ usn, email, name, photo = '', mobile = '' }) {
             const token = makeToken();
             await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
                 usn,
                 email,
                 name,
                 photo,
+                mobile,
                 expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
             });
             return token;

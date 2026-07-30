@@ -461,7 +461,7 @@ function startBirthdayScheduler(firestore, mailer) {
         console.log('🎂 Birthday scheduler: running a catch-up check now (BIRTHDAY_RUN_ON_START=1).');
         checkBirthdaysAndSendEmails(firestore, mailer, true);
     } else {
-        console.log('🎂 Birthday scheduler registered. No check on start — set BIRTHDAY_RUN_ON_START=1 to force one.');
+        console.log('🎂 Birthday scheduler registered. No check on start. Set BIRTHDAY_RUN_ON_START=1 to force one.');
     }
 
     scheduleNextRun();
