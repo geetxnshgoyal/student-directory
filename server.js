@@ -62,7 +62,7 @@ const CARPOOL_MAX_FUTURE_MS = 30 * 24 * 60 * 60 * 1000;
 const CARPOOL_MAX_OTP_ATTEMPTS = 5;
 const CARPOOL_CACHE_MS = 5000;
 const CARPOOL_DIRECTIONS = new Set(['hostel', 'airport']);
-const CARPOOL_WAIT_CHOICES = [15, 30, 60];
+const CARPOOL_WAIT_CHOICES = [15, 30, 60, 240];
 
 const CARPOOL_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
