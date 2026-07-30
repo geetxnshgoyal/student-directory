@@ -223,7 +223,7 @@ function showForm(mode = 'create') {
 
     document.getElementById('form-eyebrow').textContent = editing ? 'Change your trip' : 'Step 2 of 2';
     document.getElementById('form-title').textContent = isHostel ? 'Airport → Hostel' : 'Hostel → Airport';
-    document.getElementById('time-label').textContent = isHostel ? 'Landing time at BLR' : 'Pickup time at campus';
+    document.getElementById('time-label').textContent = isHostel ? 'Landing time at BLR' : 'Pickup time at the hostel';
     document.getElementById('trip-submit-label').textContent = editing ? 'Save changes' : 'Post my trip';
     setStatus(document.getElementById('trip-status'), '', 'neutral');
     inputs.time.min = istInputNow();

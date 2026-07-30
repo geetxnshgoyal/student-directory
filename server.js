@@ -380,7 +380,7 @@ function whatsappLink(recipient, other, match) {
     const number = whatsappNumber(other.mobile);
     if (!number) return '';
 
-    const where = match.direction === 'airport' ? 'to BLR airport' : 'to campus from BLR';
+    const where = match.direction === 'airport' ? 'to BLR airport' : 'to the hostel from BLR airport';
     const message =
         `Hi ${displayName(other).split(' ')[0]}! This is ${displayName(recipient).split(' ')[0]} from NST. ` +
         `We're both heading ${where} around ${formatIstTime(other.time)}. Want to split a cab?`;
@@ -388,32 +388,13 @@ function whatsappLink(recipient, other, match) {
     return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
 }
 
-function matchAlertHtml(recipient, other, match, heading) {
-    const wa = whatsappLink(recipient, other, match);
-    const initial = escapeHtml(displayName(other).trim().charAt(0).toUpperCase() || '?');
-    const arriving = match.direction === 'hostel';
-    const accent = arriving ? '#2C5F55' : '#97382C';
-
-    const avatar = other.photo && String(other.photo).startsWith('data:image')
-        ? `<img src="cid:carpool_match_photo" width="76" height="76" alt="" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
-        : `<div style="width:76px;height:76px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;margin:0 auto;text-align:center;line-height:76px;font-size:30px;font-weight:700;color:#ffffff;">${initial}</div>`;
-
-    const waButton = wa
-        ? `<tr><td style="padding:0 32px 8px 32px;" align="center">
-             <a href="${escapeHtml(wa)}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
-               Message ${escapeHtml(displayName(other).split(' ')[0])} on WhatsApp
-             </a>
-             <div style="font-size:12px;color:#8A8377;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
-           </td></tr>`
-        : `<tr><td style="padding:0 32px 8px 32px;" align="center">
-             <div style="font-size:13px;color:#8A8377;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
-           </td></tr>`;
-
-    const row = (label, value) => `
+// One shell for every carpool email, so nothing goes out as bare plain text.
+function carpoolEmailShell({ accent, avatarHtml, eyebrow, title, subtitle, rows, bodyLine, ctaHtml, footnote }) {
+    const rowHtml = rows.map(([label, value]) => `
         <tr>
           <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:13px;color:#8A8377;">${escapeHtml(label)}</td>
           <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:14px;color:#1C1E22;font-weight:600;text-align:right;font-family:'SF Mono',Menlo,monospace;">${escapeHtml(value)}</td>
-        </tr>`;
+        </tr>`).join('');
 
     return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -423,35 +404,28 @@ function matchAlertHtml(recipient, other, match, heading) {
       <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
 
         <tr><td style="background:${accent};padding:34px 32px 28px 32px;text-align:center;">
-          ${avatar}
-          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:16px 0 6px 0;">You have a ride match</div>
-          <div style="color:#ffffff;font-size:25px;font-weight:700;">${escapeHtml(displayName(other))}</div>
-          <div style="color:rgba(255,255,255,0.8);font-size:14px;margin-top:5px;">is travelling ${escapeHtml(heading)} with you</div>
+          ${avatarHtml}
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:16px 0 6px 0;">${escapeHtml(eyebrow)}</div>
+          <div style="color:#ffffff;font-size:25px;font-weight:700;">${escapeHtml(title)}</div>
+          <div style="color:rgba(255,255,255,0.8);font-size:14px;margin-top:5px;">${escapeHtml(subtitle)}</div>
         </td></tr>
 
         <tr><td style="padding:28px 32px 8px 32px;">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0">
-            ${row('Their time', formatIstTime(other.time) + (other.flightCode ? ` · ${other.flightCode}` : ''))}
-            ${row('Your time', formatIstTime(recipient.time) + (recipient.flightCode ? ` · ${recipient.flightCode}` : ''))}
-            ${row('Gap between you', `about ${match.gapMinutes} min`)}
-          </table>
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">${rowHtml}</table>
         </td></tr>
 
         <tr><td style="padding:24px 32px 6px 32px;" align="center">
-          <div style="font-size:15px;color:#5F594E;line-height:1.6;">Split the fare. Say hello and sort out a pickup point.</div>
+          <div style="font-size:15px;color:#5F594E;line-height:1.6;">${escapeHtml(bodyLine)}</div>
         </td></tr>
 
-        ${waButton}
+        ${ctaHtml}
 
         <tr><td style="padding:22px 32px 30px 32px;" align="center">
           <a href="${escapeHtml(process.env.PUBLIC_BASE_URL || '')}/carpool" style="font-size:13px;color:#9A6822;font-weight:600;text-decoration:none;">Open the carpool board &rarr;</a>
         </td></tr>
 
         <tr><td style="background:#F1EBDD;padding:18px 32px;text-align:center;border-top:1px solid #E7E0D0;">
-          <div style="font-size:11px;color:#8A8377;line-height:1.6;">
-            You're both on the NST Carpool board for the same trip, so we shared your numbers to let you arrange the ride.<br>
-            Cancel your trip on the board to stop these emails.
-          </div>
+          <div style="font-size:11px;color:#8A8377;line-height:1.6;">${escapeHtml(footnote)}</div>
         </td></tr>
 
       </table>
@@ -460,32 +434,101 @@ function matchAlertHtml(recipient, other, match, heading) {
 </body></html>`;
 }
 
+function otpEmailHtml(otp) {
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
+        <tr><td style="background:#9A6822;padding:26px 32px;text-align:center;">
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;">NST Carpool</div>
+          <div style="color:#ffffff;font-size:22px;font-weight:700;margin-top:6px;">Your sign-in code</div>
+        </td></tr>
+        <tr><td style="padding:34px 32px 10px 32px;" align="center">
+          <div style="font-family:'SF Mono',Menlo,monospace;font-size:38px;font-weight:700;letter-spacing:10px;color:#1C1E22;padding-left:10px;">${escapeHtml(otp)}</div>
+          <div style="font-size:13px;color:#8A8377;margin-top:16px;">This code expires in 10 minutes.</div>
+        </td></tr>
+        <tr><td style="background:#F1EBDD;padding:16px 32px;text-align:center;border-top:1px solid #E7E0D0;margin-top:20px;">
+          <div style="font-size:11px;color:#8A8377;line-height:1.6;">If you didn't try to sign in to NST Carpool, you can ignore this email.</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+function avatarFor(person, cid) {
+    const initial = escapeHtml(displayName(person).trim().charAt(0).toUpperCase() || '?');
+    return person.photo && String(person.photo).startsWith('data:image')
+        ? `<img src="cid:${cid}" width="76" height="76" alt="" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
+        : `<div style="width:76px;height:76px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;margin:0 auto;text-align:center;line-height:76px;font-size:30px;font-weight:700;color:#ffffff;">${initial}</div>`;
+}
+
+function photoAttachment(person, cid) {
+    if (!person.photo || !String(person.photo).startsWith('data:image')) return [];
+    try {
+        return [{
+            filename: 'photo.jpg',
+            content: Buffer.from(String(person.photo).split(';base64,').pop(), 'base64'),
+            cid
+        }];
+    } catch (e) {
+        console.error('Carpool photo attach failed:', e);
+        return [];
+    }
+}
+
+function whatsappCta(recipient, other, match) {
+    const wa = whatsappLink(recipient, other, match);
+    if (!wa) {
+        return `<tr><td style="padding:0 32px 8px 32px;" align="center">
+                  <div style="font-size:13px;color:#8A8377;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
+                </td></tr>`;
+    }
+    return `<tr><td style="padding:0 32px 8px 32px;" align="center">
+              <a href="${escapeHtml(wa)}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
+                Message ${escapeHtml(displayName(other).split(' ')[0])} on WhatsApp
+              </a>
+              <div style="font-size:12px;color:#8A8377;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
+            </td></tr>`;
+}
+
+function tripRows(recipient, other, match) {
+    return [
+        ['Their time', formatIstTime(other.time) + (other.flightCode ? ` \u00b7 ${other.flightCode}` : '')],
+        ['Your time', formatIstTime(recipient.time) + (recipient.flightCode ? ` \u00b7 ${recipient.flightCode}` : '')],
+        ['Gap between you', `about ${match.gapMinutes} min`]
+    ];
+}
+
+function directionAccent(direction) {
+    return direction === 'hostel' ? '#2C5F55' : '#97382C';
+}
+
 async function sendMatchAlert(recipient, other, match) {
     const heading = match.direction === 'airport'
         ? 'to BLR airport'
-        : 'from BLR airport back to campus';
-
-    const attachments = [];
-    if (other.photo && String(other.photo).startsWith('data:image')) {
-        try {
-            attachments.push({
-                filename: 'match.jpg',
-                content: Buffer.from(String(other.photo).split(';base64,').pop(), 'base64'),
-                cid: 'carpool_match_photo'
-            });
-        } catch (e) {
-            console.error('Carpool match photo attach failed:', e);
-        }
-    }
-
+        : 'from BLR airport back to the hostel';
+    const cid = 'carpool_photo';
     const wa = whatsappLink(recipient, other, match);
 
     await mailer.sendMail({
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: recipient.email,
         subject: `NST Carpool: ${displayName(other)} is travelling near your time`,
-        attachments,
-        html: matchAlertHtml(recipient, other, match, heading),
+        attachments: photoAttachment(other, cid),
+        html: carpoolEmailShell({
+            accent: directionAccent(match.direction),
+            avatarHtml: avatarFor(other, cid),
+            eyebrow: 'You have a ride match',
+            title: displayName(other),
+            subtitle: `is travelling ${heading} with you`,
+            rows: tripRows(recipient, other, match),
+            bodyLine: 'Split the fare. Say hello and sort out a pickup point.',
+            ctaHtml: whatsappCta(recipient, other, match),
+            footnote: "You're both on the NST Carpool board for the same trip, so we shared your numbers to let you arrange the ride. Cancel your trip on the board to stop these emails."
+        }),
         text: [
             `Hi ${displayName(recipient)},`,
             ``,
@@ -818,8 +861,9 @@ app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
         await mailer.sendMail({
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: email,
-            subject: 'NST Carpool OTP',
-            text: `Your NST carpool OTP is ${otp}. It expires in 10 minutes.`
+            subject: `${otp} is your NST Carpool code`,
+            html: otpEmailHtml(otp),
+            text: `Your NST carpool code is ${otp}. It expires in 10 minutes.`
         });
 
         const hint = maskEmail(email);
@@ -1072,14 +1116,28 @@ app.post('/api/carpool/accept', apiLimiter, requireCarpoolSession, async (req, r
             return res.json({ success: true, alreadySent: true });
         }
 
-        const heading = match.direction === 'airport' ? 'to BLR airport' : 'from BLR airport to campus';
+        const heading = match.direction === 'airport' ? 'to BLR airport' : 'from BLR airport to the hostel';
         const requesterWhen = formatIstTime(requester.time);
         const otherWhen = formatIstTime(other.time);
+
+        const cid = 'carpool_photo';
 
         await mailer.sendMail({
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: other.email,
             subject: `NST Carpool: ${displayName(requester)} wants to share your ride`,
+            attachments: photoAttachment(requester, cid),
+            html: carpoolEmailShell({
+                accent: directionAccent(match.direction),
+                avatarHtml: avatarFor(requester, cid),
+                eyebrow: 'Ride request',
+                title: displayName(requester),
+                subtitle: `wants to share your ride ${heading}`,
+                rows: tripRows(other, requester, match),
+                bodyLine: 'They asked us to pass on their details so you can sort out the ride.',
+                ctaHtml: whatsappCta(other, requester, match),
+                footnote: `${displayName(requester)} shared their details with you from the NST Carpool board. Cancel your trip on the board to stop these emails.`
+            }),
             text: [
                 `Hi ${displayName(other)},`,
                 ``,
@@ -1095,12 +1153,22 @@ app.post('/api/carpool/accept', apiLimiter, requireCarpoolSession, async (req, r
             ].join('\n')
         });
 
-        // Only the person who tapped Connect reveals their own address. The other
-        // traveller's email stays private until they choose to do the same.
         await mailer.sendMail({
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: requester.email,
             subject: `NST Carpool: your details went to ${displayName(other)}`,
+            attachments: photoAttachment(other, cid),
+            html: carpoolEmailShell({
+                accent: directionAccent(match.direction),
+                avatarHtml: avatarFor(other, cid),
+                eyebrow: 'Details shared',
+                title: displayName(other),
+                subtitle: `now has your contact details`,
+                rows: tripRows(requester, other, match),
+                bodyLine: `We let ${displayName(other)} know you want to share the ride ${heading}.`,
+                ctaHtml: whatsappCta(requester, other, match),
+                footnote: 'You shared your details from the NST Carpool board. Cancel your trip on the board to stop these emails.'
+            }),
             text: [
                 `Hi ${displayName(requester)},`,
                 ``,
@@ -1109,9 +1177,6 @@ app.post('/api/carpool/accept', apiLimiter, requireCarpoolSession, async (req, r
                 `Their time: ${otherWhen}${other.flightCode ? ` (${other.flightCode})` : ''}`,
                 `Your time:  ${requesterWhen}${requester.flightCode ? ` (${requester.flightCode})` : ''}`,
                 `Gap between you: about ${match.gapMinutes} min`,
-                ``,
-                `They can reach you now. We haven't given you their address - if they`,
-                `want to share it, they'll tap Connect too.`,
                 ``,
                 `- NST Carpool`
             ].join('\n')
