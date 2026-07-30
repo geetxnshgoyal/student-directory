@@ -945,18 +945,6 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
     }
 });
 
-app.get('/api/carpool/status', apiLimiter, async (req, res) => {
-    try {
-        const requests = await listActiveCarpoolRequests();
-        res.json({
-            activeRequests: requests.length,
-            matchCount: buildMatches(requests).length
-        });
-    } catch (e) {
-        console.error("Carpool status failed:", e);
-        res.status(500).json({ error: 'Status unavailable' });
-    }
-});
 
 // One authenticated snapshot of everything the dashboard renders. The board stays
 // locked until the student posts their own journey.
