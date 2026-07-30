@@ -925,19 +925,19 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
         await carpoolSet(CARPOOL_COLLECTIONS.requests, id, request);
         invalidateCarpoolCache();
 
-        // Tell both sides as soon as a match exists, rather than waiting for
-        // someone to happen to open the board.
-        try {
-            await notifyNewMatches(req.carpoolUser.usn, await listActiveCarpoolRequests());
-        } catch (err) {
-            console.error('Carpool match notification failed:', err);
-        }
-
         res.json({
             success: true,
             requestId: id,
             request: serializeRequest({ id, ...request }, req.carpoolUser.usn)
         });
+
+        // Answer first, then mail. Awaiting two SMTP round trips before
+        // responding left the student watching a spinner and ate into the
+        // serverless execution budget.
+        listActiveCarpoolRequests()
+            .then(rows => notifyNewMatches(req.carpoolUser.usn, rows))
+            .catch(err => console.error('Carpool match notification failed:', err));
+
         purgeExpiredCarpoolData();
     } catch (e) {
         console.error("Carpool request save failed:", e);

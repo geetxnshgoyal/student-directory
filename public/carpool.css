@@ -26,6 +26,8 @@
 /* ---------- Night: warm charcoal and parchment ---------- */
 :root,
 :root[data-theme='dark'] {
+    color-scheme: dark;
+
     --bg: #16171B;
     --surface: #1D1F24;
     --surface-2: #24272E;
@@ -52,6 +54,8 @@
 
 /* ---------- Day: oat paper and ink ---------- */
 :root[data-theme='light'] {
+    color-scheme: light;
+
     --bg: #F6F2E9;
     --surface: #FFFDF8;
     --surface-2: #F1EBDD;
@@ -399,6 +403,23 @@ body::before {
     background-size: 5px 5px, 5px 5px;
     background-repeat: no-repeat;
     cursor: pointer;
+}
+
+input[type='datetime-local']::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.8;
+    padding: 4px;
+    border-radius: 4px;
+    transition: opacity 160ms var(--ease), background 160ms var(--ease);
+}
+
+input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+    background: var(--accent-wash);
+}
+
+:root[data-theme='dark'] input[type='datetime-local']::-webkit-calendar-picker-indicator {
+    filter: invert(1) brightness(1.6);
 }
 
 .field-hint {
