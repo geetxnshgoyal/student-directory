@@ -52,9 +52,11 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('he
 const otpStore = new Map();
 let adminOtpEntry = null;
 const ADMIN_DEFAULT_OTP = process.env.ADMIN_DEFAULT_OTP;
+const DEMO_USN = process.env.DEMO_USN || '';
+const DEMO_OTP = process.env.DEMO_OTP || '';
 
 const CARPOOL_OTP_TTL_MS = 10 * 60 * 1000;
-const CARPOOL_SESSION_TTL_MS = 60 * 60 * 1000;
+const CARPOOL_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 const CARPOOL_TRAVEL_GRACE_MS = 2 * 60 * 60 * 1000;
 const CARPOOL_MAX_FUTURE_MS = 30 * 24 * 60 * 60 * 1000;
 const CARPOOL_MAX_OTP_ATTEMPTS = 5;
@@ -781,6 +783,11 @@ app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
         if (!usn) return res.status(400).json({ error: 'USN required' });
         if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
 
+        // Demo account — skip DB lookup and email, just acknowledge
+        if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
+            return res.json({ success: true, emailHint: 'de***@demo', message: 'OTP sent to de***@demo' });
+        }
+
         const students = await loadStudentsFromFirestore();
         if (!students) return res.status(503).json({ error: 'Database service offline' });
         const student = students.find(s => s.usn === usn);
@@ -822,6 +829,24 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
         const usn = String(req.body?.usn || '').trim();
         const otp = String(req.body?.otp || '').trim();
         if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
+
+        // Demo account — validate against static OTP, no DB lookup
+        if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
+            if (!timingSafeMatch(otp, DEMO_OTP)) {
+                return res.status(400).json({ error: 'Invalid OTP' });
+            }
+            const demoName = 'Demo Student';
+            const token = makeToken();
+            await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
+                usn: DEMO_USN,
+                email: 'demo@nst.demo',
+                name: demoName,
+                photo: '',
+                mobile: '',
+                expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
+            });
+            return res.json({ success: true, token, email: 'demo@nst.demo', name: demoName, photo: '' });
+        }
 
         const entry = await carpoolGet(CARPOOL_COLLECTIONS.otps, usn);
         if (!entry || Number(entry.expiresAt) <= Date.now()) {
