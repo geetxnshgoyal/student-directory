@@ -19,7 +19,6 @@ let state = {
     resendSeconds: 0
 };
 
-const acceptedMatches = new Set();
 let lastMatchesSignature = null;
 let lastBoardSignature = null;
 
@@ -458,7 +457,6 @@ forms.trip.addEventListener('submit', async (e) => {
         });
 
         state.myRequest = data.request || null;
-        acceptedMatches.clear();
         lastMatchesSignature = null;
         lastBoardSignature = null;
         if (state.myRequest) {
@@ -485,7 +483,6 @@ document.getElementById('cancel-request-btn').addEventListener('click', async ()
     try {
         await api('/cancel', { method: 'POST' });
         state.myRequest = null;
-        acceptedMatches.clear();
         lastMatchesSignature = null;
         lastBoardSignature = null;
         showSelector();
@@ -751,7 +748,7 @@ function renderMatches(matches) {
     if (!list) return;
 
     const rows = Array.isArray(matches) ? matches : [];
-    const signature = JSON.stringify([rows.map(m => [m.id, m.time, m.name]), [...acceptedMatches]]);
+    const signature = JSON.stringify(rows.map(m => [m.id, m.time, m.name]));
     if (signature === lastMatchesSignature) return;
     lastMatchesSignature = signature;
 
@@ -769,7 +766,6 @@ function renderMatches(matches) {
     }
 
     list.innerHTML = rows.map(m => {
-        const sent = acceptedMatches.has(m.id);
         const firstName = String(m.name || 'them').split(' ')[0];
         const gap = Math.abs(Number(m.gapMinutes) || 0);
         const gapText = gap === 0 ? 'Same time' : `${gap} min apart`;
@@ -795,40 +791,9 @@ function renderMatches(matches) {
 
                 <p class="match-note">${escapeHtml(getFunnyMessage(m))}</p>
 
-                <button class="btn ${sent ? 'btn-quiet' : 'btn-primary'} btn-connect${sent ? ' is-sent' : ''}"
-                        data-match-id="${escapeHtml(m.id)}"${sent ? ' disabled' : ''}>
-                    <span class="btn-label">${sent ? 'Introduction sent' : `Share my details with ${escapeHtml(firstName)}`}</span>
-                </button>
+                <p class="match-sent">We emailed you both. Check your inbox to message ${escapeHtml(firstName)} on WhatsApp.</p>
             </article>`;
     }).join('');
-}
-
-document.getElementById('matches-list').addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-match-id]');
-    if (btn && !btn.disabled) acceptMatch(btn);
-});
-
-async function acceptMatch(btn) {
-    const matchId = btn.dataset.matchId;
-    const label = btn.querySelector('.btn-label') || btn;
-    const original = label.textContent;
-    btn.disabled = true;
-    label.textContent = 'Sending...';
-
-    try {
-        await api('/accept', {
-            method: 'POST',
-            body: JSON.stringify({ matchId })
-        });
-        acceptedMatches.add(matchId);
-        label.textContent = 'Email sent!';
-        btn.classList.add('is-sent');
-    } catch (err) {
-        if (err.message === 'session-expired') return;
-        label.textContent = err.message || 'Failed';
-        btn.disabled = false;
-        setTimeout(() => { label.textContent = original; }, 2500);
-    }
 }
 
 // Start
