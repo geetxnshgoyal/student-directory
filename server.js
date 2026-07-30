@@ -785,7 +785,7 @@ app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
 
         // Demo account — skip DB lookup and email, just acknowledge
         if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
-            return res.json({ success: true, emailHint: 'de***@demo', message: 'OTP sent to de***@demo' });
+            return res.json({ success: true, emailHint: 'de***@svyasa-sas.edu.in', message: 'OTP sent to de***@svyasa-sas.edu.in' });
         }
 
         const students = await loadStudentsFromFirestore();
@@ -835,17 +835,18 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
             if (!timingSafeMatch(otp, DEMO_OTP)) {
                 return res.status(400).json({ error: 'Invalid OTP' });
             }
-            const demoName = 'Demo Student';
+            const demoName = 'Demo';
+            const demoEmail = 'demo@svyasa-sas.edu.in';
             const token = makeToken();
             await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
                 usn: DEMO_USN,
-                email: 'demo@nst.demo',
+                email: demoEmail,
                 name: demoName,
                 photo: '',
                 mobile: '',
                 expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
             });
-            return res.json({ success: true, token, email: 'demo@nst.demo', name: demoName, photo: '' });
+            return res.json({ success: true, token, email: demoEmail, name: demoName, photo: '' });
         }
 
         const entry = await carpoolGet(CARPOOL_COLLECTIONS.otps, usn);
