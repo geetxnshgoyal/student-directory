@@ -1,4 +1,55 @@
-const admin = require('firebase-admin');
+const { FieldValue } = require('firebase-admin/firestore');
+
+const RUN_COLLECTION = 'birthday_runs';
+
+function isAlreadyExists(err) {
+    // gRPC ALREADY_EXISTS
+    return err?.code === 6 || /ALREADY_EXISTS/i.test(err?.message || '');
+}
+
+/**
+ * Claim today's run. create() fails when the document already exists, so exactly
+ * one invocation wins the day even if the Vercel cron, a cold start and a manual
+ * trigger all fire at once.
+ */
+async function claimBirthdayRun(firestore, todayStr) {
+    const ref = firestore.collection(RUN_COLLECTION).doc(todayStr);
+    try {
+        await ref.create({
+            date: todayStr,
+            startedAt: FieldValue.serverTimestamp(),
+            wishesSent: [],
+            reminderSent: false
+        });
+        return { ref, fresh: true };
+    } catch (err) {
+        if (!isAlreadyExists(err)) throw err;
+        return { ref, fresh: false };
+    }
+}
+
+/**
+ * Reserve one student's wish inside a transaction, so two concurrent runs can
+ * never both decide to email the same person.
+ */
+async function reserveWish(firestore, ref, usn) {
+    return firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const sent = snap.data()?.wishesSent || [];
+        if (sent.includes(usn)) return false;
+        tx.update(ref, { wishesSent: FieldValue.arrayUnion(usn) });
+        return true;
+    });
+}
+
+async function reserveReminder(firestore, ref) {
+    return firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.data()?.reminderSent) return false;
+        tx.update(ref, { reminderSent: true });
+        return true;
+    });
+}
 
 function getTodayDDMM(date = new Date()) {
     const kolkataTime = date.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
@@ -266,11 +317,11 @@ async function checkBirthdaysAndSendEmails(firestore, mailer, isStartup = false)
         const todayStr = getTodayDateString();
         console.log(`🎂 Birthday check triggered: ${todayStr} (Startup: ${isStartup})`);
 
-        const runRef = firestore.collection('birthday_runs').doc('last_run');
-        const runDoc = await runRef.get();
-        if (runDoc.exists && runDoc.data().date === todayStr) {
-            console.log(`🎂 Birthday emails already sent for today (${todayStr}). Skipping.`);
-            return;
+        // Claim the day up front. Every send below is reserved individually, so
+        // a second run today finds nothing left to do instead of re-sending.
+        const { ref: runRef, fresh } = await claimBirthdayRun(firestore, todayStr);
+        if (!fresh) {
+            console.log(`🎂 Today's run (${todayStr}) is already claimed; checking for anything unsent.`);
         }
 
         const snapshot = await firestore.collection('students').get();
@@ -296,34 +347,66 @@ async function checkBirthdaysAndSendEmails(firestore, mailer, isStartup = false)
             }
         }
 
-        if (todayBirthdays.length > 0) {
-            console.log(`🎉 Birthdays found for today (${todayDDMM}): ${todayBirthdays.map(s => s.name).join(', ')}`);
-            
-            for (const birthdayStudent of todayBirthdays) {
-                await sendBirthdayWishEmail(mailer, birthdayStudent);
-            }
-
-            await sendClassmateBirthdayReminder(mailer, todayBirthdays, students);
-
-            await runRef.set({
-                date: todayStr,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                sentToCount: todayBirthdays.length
-            });
-            console.log(`🎉 Recorded successful run for today: ${todayStr}`);
-        } else {
+        if (todayBirthdays.length === 0) {
             console.log(`🎂 Checked birthdays. No student birthdays match today (${todayDDMM}).`);
-            
-            await runRef.set({
-                date: todayStr,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                sentToCount: 0
-            });
+            await runRef.set({ completedAt: FieldValue.serverTimestamp(), sentToCount: 0 }, { merge: true });
+            return;
         }
+
+        console.log(`🎉 Birthdays found for today (${todayDDMM}): ${todayBirthdays.map(s => s.name).join(', ')}`);
+
+        let sent = 0;
+        for (const birthdayStudent of todayBirthdays) {
+            const reserved = await reserveWish(firestore, runRef, birthdayStudent.usn);
+            if (!reserved) {
+                console.log(`🎂 Wish for ${birthdayStudent.name} already sent today. Skipping.`);
+                continue;
+            }
+            try {
+                await sendBirthdayWishEmail(mailer, birthdayStudent);
+                sent += 1;
+            } catch (err) {
+                // Deliberately keep the reservation. A throw does not prove the
+                // message was not delivered - SMTP may have accepted it before the
+                // connection dropped - so retrying risks a duplicate. Record it
+                // and let a human decide instead.
+                await runRef.update({ failed: FieldValue.arrayUnion(birthdayStudent.usn) });
+                console.error(
+                    `❌ Birthday wish to ${birthdayStudent.name} (${birthdayStudent.usn}) failed. ` +
+                    `NOT retried automatically - resend by hand if it truly did not arrive.`, err
+                );
+            }
+        }
+
+        if (await reserveReminder(firestore, runRef)) {
+            try {
+                await sendClassmateBirthdayReminder(mailer, todayBirthdays, students);
+            } catch (err) {
+                await runRef.update({ reminderFailed: true });
+                console.error(
+                    '❌ Classmate reminder failed. NOT retried automatically - a retry could ' +
+                    'double-send to the whole class.', err
+                );
+            }
+        } else {
+            console.log('🎂 Classmate reminder already sent today. Skipping.');
+        }
+
+        await runRef.set({
+            completedAt: FieldValue.serverTimestamp(),
+            sentToCount: todayBirthdays.length
+        }, { merge: true });
+        console.log(`🎉 Birthday run for ${todayStr} finished. ${sent} new wish email(s) sent.`);
     } catch (err) {
         console.error('❌ Scheduler: Error running birthday checklist:', err);
     }
 }
+
+// Land just after the date rolls over, never a fraction before it: firing early
+// would compute yesterday's date and reschedule with a near-zero delay.
+const MIDNIGHT_BUFFER_MS = 30 * 1000;
+
+let schedulerRegistered = false;
 
 function startBirthdayScheduler(firestore, mailer) {
     if (!firestore || !mailer) {
@@ -331,36 +414,56 @@ function startBirthdayScheduler(firestore, mailer) {
         return;
     }
 
-    console.log('🎂 Birthday scheduler successfully registered.');
+    // On Vercel this module is re-imported on every cold start, so an in-process
+    // timer would fire the check over and over. The platform cron in vercel.json
+    // drives /api/cron/birthday instead.
+    if (process.env.VERCEL) {
+        console.log('🎂 Birthday scheduler: skipped on Vercel; the platform cron drives it.');
+        return;
+    }
 
-    const getMsUntilMidnight = () => {
+    if (schedulerRegistered) {
+        console.log('🎂 Birthday scheduler already registered in this process. Ignoring.');
+        return;
+    }
+    schedulerRegistered = true;
+
+    const msUntilNextIstMidnight = () => {
         const now = new Date();
-        const kolkataTime = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
-        const localNow = new Date(kolkataTime);
+        // toLocaleString drops milliseconds, so put them back before measuring.
+        const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+        istNow.setMilliseconds(now.getMilliseconds());
 
-        const nextMidnight = new Date(
-            localNow.getFullYear(),
-            localNow.getMonth(),
-            localNow.getDate() + 1,
-            0, 0, 0, 0
-        );
+        const nextMidnight = new Date(istNow);
+        nextMidnight.setDate(nextMidnight.getDate() + 1);
+        nextMidnight.setHours(0, 0, 0, 0);
 
-        const diffMs = nextMidnight.getTime() - localNow.getTime();
-        return diffMs;
+        return (nextMidnight.getTime() - istNow.getTime()) + MIDNIGHT_BUFFER_MS;
     };
 
     const scheduleNextRun = () => {
-        const delay = getMsUntilMidnight();
-        const hours = (delay / 3600000).toFixed(2);
-        console.log(`🎂 Birthday scheduler: next check scheduled in ${hours} hours (at midnight Asia/Kolkata)`);
+        const delay = msUntilNextIstMidnight();
+        const at = new Date(Date.now() + delay)
+            .toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+        console.log(`🎂 Birthday scheduler: next check in ${(delay / 3600000).toFixed(2)}h, at ${at} IST`);
 
-        setTimeout(async () => {
+        const timer = setTimeout(async () => {
             await checkBirthdaysAndSendEmails(firestore, mailer, false);
             scheduleNextRun();
         }, delay);
+        // Don't hold the process open purely for this timer.
+        if (typeof timer.unref === 'function') timer.unref();
     };
 
-    checkBirthdaysAndSendEmails(firestore, mailer, true);
+    // Deliberately no check on boot. With `npm run dev` (nodemon) every file save
+    // restarts the process, and a start-up check would run the whole thing again.
+    if (process.env.BIRTHDAY_RUN_ON_START === '1') {
+        console.log('🎂 Birthday scheduler: running a catch-up check now (BIRTHDAY_RUN_ON_START=1).');
+        checkBirthdaysAndSendEmails(firestore, mailer, true);
+    } else {
+        console.log('🎂 Birthday scheduler registered. No check on start. Set BIRTHDAY_RUN_ON_START=1 to force one.');
+    }
+
     scheduleNextRun();
 }
 

@@ -35,7 +35,6 @@ try {
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const nodemailer = require('nodemailer');
@@ -44,21 +43,37 @@ const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 
 const app = express();
+// Vercel terminates TLS in front of us. Without this every request looks like it
+// comes from the proxy, so all users would share a single rate-limit bucket.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 
-let storedPasswordHash = null;
-
-(async () => {
-    storedPasswordHash = await bcrypt.hash('123456778', 12);
-})();
-
 const otpStore = new Map();
-const carpoolSessions = new Map();
-const carpoolRequests = [];
-const sseClients = new Set();
 let adminOtpEntry = null;
 const ADMIN_DEFAULT_OTP = process.env.ADMIN_DEFAULT_OTP;
+
+const CARPOOL_OTP_TTL_MS = 10 * 60 * 1000;
+const CARPOOL_SESSION_TTL_MS = 60 * 60 * 1000;
+const CARPOOL_TRAVEL_GRACE_MS = 2 * 60 * 60 * 1000;
+const CARPOOL_MAX_FUTURE_MS = 30 * 24 * 60 * 60 * 1000;
+const CARPOOL_MAX_OTP_ATTEMPTS = 5;
+const CARPOOL_CACHE_MS = 5000;
+const CARPOOL_DIRECTIONS = new Set(['hostel', 'airport']);
+const CARPOOL_WAIT_CHOICES = [15, 30, 60];
+
+const CARPOOL_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
+
+const CARPOOL_COLLECTIONS = {
+    otps: 'carpool_otps',
+    sessions: 'carpool_sessions',
+    requests: 'carpool_requests',
+    notified: 'carpool_notified'
+};
+
+// Carpool state lives in Firestore so it survives across serverless invocations.
+// These maps only back local runs started without Firebase credentials.
+const carpoolMemory = new Map(Object.values(CARPOOL_COLLECTIONS).map(name => [name, new Map()]));
 
 const smtpConfig = {
     host: process.env.SMTP_HOST,
@@ -114,39 +129,197 @@ function makeToken() {
     return crypto.randomBytes(24).toString('hex');
 }
 
-function minutesDiff(a, b) {
-    return Math.abs(a.getTime() - b.getTime()) / 60000;
+function maskEmail(email) {
+    return String(email || '').replace(/(.{2})([^@]*)(@.*)/, '$1***$3');
 }
 
-function cleanOldEntries() {
+function timingSafeMatch(provided, expected) {
+    const a = Buffer.from(String(provided ?? ''));
+    const b = Buffer.from(String(expected ?? ''));
+    if (a.length !== b.length || a.length === 0) return false;
+    return crypto.timingSafeEqual(a, b);
+}
+
+async function carpoolSet(collection, id, data) {
+    if (firestore) {
+        await firestore.collection(collection).doc(id).set(data);
+        return;
+    }
+    carpoolMemory.get(collection).set(id, { ...data });
+}
+
+async function carpoolGet(collection, id) {
+    if (firestore) {
+        const snapshot = await firestore.collection(collection).doc(id).get();
+        return snapshot.exists ? snapshot.data() : null;
+    }
+    const value = carpoolMemory.get(collection).get(id);
+    return value ? { ...value } : null;
+}
+
+async function carpoolDelete(collection, id) {
+    if (firestore) {
+        await firestore.collection(collection).doc(id).delete();
+        return;
+    }
+    carpoolMemory.get(collection).delete(id);
+}
+
+async function carpoolList(collection) {
+    if (firestore) {
+        const snapshot = await firestore.collection(collection).get();
+        return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+    return [...carpoolMemory.get(collection).entries()].map(([id, value]) => ({ id, ...value }));
+}
+
+// A journey stays on the board until shortly after its travel time, so a flight
+// booked days ahead does not disappear while the student waits for it.
+function isRequestActive(request, now = Date.now()) {
+    const travelTime = Number(request.time);
+    if (!Number.isFinite(travelTime)) return false;
+    return travelTime > now - CARPOOL_TRAVEL_GRACE_MS;
+}
+
+let carpoolRequestCache = { at: 0, rows: [] };
+
+function invalidateCarpoolCache() {
+    carpoolRequestCache = { at: 0, rows: [] };
+}
+
+async function listActiveCarpoolRequests() {
     const now = Date.now();
-    for (const [key, entry] of otpStore.entries()) {
-        if (entry.expiresAt <= now) otpStore.delete(key);
+    if (now - carpoolRequestCache.at < CARPOOL_CACHE_MS) {
+        return carpoolRequestCache.rows.filter(row => isRequestActive(row, now));
     }
-    for (const [token, entry] of carpoolSessions.entries()) {
-        if (entry.expiresAt <= now) carpoolSessions.delete(token);
-    }
-    const cutoff = now - (6 * 60 * 60 * 1000);
-    while (carpoolRequests.length && carpoolRequests[0].createdAt < cutoff) {
-        carpoolRequests.shift();
+    const rows = (await carpoolList(CARPOOL_COLLECTIONS.requests))
+        .filter(row => isRequestActive(row, now))
+        .sort((a, b) => Number(a.time) - Number(b.time));
+    carpoolRequestCache = { at: now, rows };
+    return rows;
+}
+
+let lastCarpoolPurge = 0;
+
+async function purgeExpiredCarpoolData() {
+    const now = Date.now();
+    if (now - lastCarpoolPurge < 60 * 1000) return;
+    lastCarpoolPurge = now;
+
+    try {
+        const [otps, sessions, requests, notified] = await Promise.all([
+            carpoolList(CARPOOL_COLLECTIONS.otps),
+            carpoolList(CARPOOL_COLLECTIONS.sessions),
+            carpoolList(CARPOOL_COLLECTIONS.requests),
+            carpoolList(CARPOOL_COLLECTIONS.notified)
+        ]);
+
+        // A "we already emailed this pair" record may only be dropped once neither
+        // side has a live journey. Expiring it on a timer instead would let the
+        // same pair be emailed twice about the same trip.
+        const activeUsns = new Set(
+            requests.filter(row => isRequestActive(row, now)).map(row => row.usn)
+        );
+        const notifyGrace = now - CARPOOL_NOTIFY_TTL_MS;
+
+        const stale = [
+            ...otps.filter(row => Number(row.expiresAt) <= now).map(row => [CARPOOL_COLLECTIONS.otps, row.id]),
+            ...sessions.filter(row => Number(row.expiresAt) <= now).map(row => [CARPOOL_COLLECTIONS.sessions, row.id]),
+            ...requests.filter(row => !isRequestActive(row, now)).map(row => [CARPOOL_COLLECTIONS.requests, row.id]),
+            ...notified
+                .filter(row => Number(row.notifiedAt) <= notifyGrace)
+                .filter(row => !(row.usns || []).some(usn => activeUsns.has(usn)))
+                .map(row => [CARPOOL_COLLECTIONS.notified, row.id])
+        ];
+
+        if (stale.length) {
+            await Promise.all(stale.map(([collection, id]) => carpoolDelete(collection, id)));
+            invalidateCarpoolCache();
+        }
+
+        for (const [key, entry] of otpStore.entries()) {
+            if (entry.expiresAt <= now) otpStore.delete(key);
+        }
+    } catch (e) {
+        console.error('Carpool purge failed:', e);
     }
 }
 
-function buildMatches() {
-    cleanOldEntries();
+// A datetime-local value carries no offset. Every carpool time is a Bangalore
+// wall-clock time, so assume IST instead of whatever zone the server runs in.
+function parseCarpoolTime(value) {
+    if (typeof value !== 'string') return null;
+    let raw = value.trim();
+    if (!raw) return null;
+    if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) raw = `${raw}:00`;
+        raw = `${raw}+05:30`;
+    }
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatIstTime(ms) {
+    return new Date(Number(ms)).toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+    });
+}
+
+function sanitizeFlightCode(value) {
+    return String(value || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9 -]/g, '')
+        .trim()
+        .slice(0, 10);
+}
+
+function normalizeWaitMinutes(value) {
+    const parsed = Number(value);
+    return CARPOOL_WAIT_CHOICES.includes(parsed) ? parsed : 30;
+}
+
+function displayName(row) {
+    return row.name || `Student ${String(row.usn || '0000').slice(-4)}`;
+}
+
+function serializeRequest(request, viewerUsn) {
+    const isYou = request.usn === viewerUsn;
+    return {
+        id: request.id,
+        name: displayName(request),
+        photo: request.photo || '',
+        direction: request.direction,
+        time: new Date(Number(request.time)).toISOString(),
+        flightCode: request.flightCode || '',
+        isYou,
+        // Only the owner needs their own tolerance, to draw their match window.
+        ...(isYou ? { waitMinutes: normalizeWaitMinutes(request.waitMinutes) } : {})
+    };
+}
+
+function buildMatches(requests) {
     const matches = [];
-    for (let i = 0; i < carpoolRequests.length; i += 1) {
-        for (let j = i + 1; j < carpoolRequests.length; j += 1) {
-            const a = carpoolRequests[i];
-            const b = carpoolRequests[j];
+    for (let i = 0; i < requests.length; i += 1) {
+        for (let j = i + 1; j < requests.length; j += 1) {
+            const a = requests[i];
+            const b = requests[j];
+            if (a.usn === b.usn) continue;
             if (a.direction !== b.direction) continue;
-            const maxWindow = 20 + Math.min(a.waitMinutes, b.waitMinutes);
-            if (minutesDiff(a.time, b.time) > maxWindow) continue;
+            // Both travellers have to be willing to sit out the gap between them.
+            const windowMinutes = Math.min(normalizeWaitMinutes(a.waitMinutes), normalizeWaitMinutes(b.waitMinutes));
+            const gapMinutes = Math.abs(Number(a.time) - Number(b.time)) / 60000;
+            if (gapMinutes > windowMinutes) continue;
             matches.push({
-                id: `${a.id}-${b.id}`,
+                id: [a.id, b.id].sort().join('.'),
                 direction: a.direction,
-                time: `${maxWindow} min window`,
-                wait: `Wait ${Math.min(a.waitMinutes, b.waitMinutes)} min`,
+                gapMinutes: Math.round(gapMinutes),
+                windowMinutes,
                 users: [a, b]
             });
         }
@@ -154,51 +327,272 @@ function buildMatches() {
     return matches;
 }
 
-function getActiveRequestsCount() {
-    cleanOldEntries();
-    return carpoolRequests.length;
+// One notification per pair of students, not per request, so editing a trip
+// doesn't re-announce a match the two of them already heard about.
+function matchPairKey(usnA, usnB) {
+    return [String(usnA), String(usnB)].sort().join('_');
 }
 
-function publishMatches() {
-    cleanOldEntries();
-    const matches = buildMatches();
-    const payload = JSON.stringify({
-        matches: matches.map(match => ({
-            id: match.id,
-            direction: match.direction,
-            time: match.time,
-            wait: match.wait,
-            name: `Student ${match.users[1].usn.slice(-4)}`
-        })),
-        activeRequests: getActiveRequestsCount(),
-        matchCount: matches.length,
-        publicRequests: carpoolRequests.map(r => ({
-            id: r.id,
-            name: r.name || `Student ${String(r.usn || '0000').slice(-4)}`,
-            photo: r.photo || '',
-            direction: r.direction,
-            time: r.time,
-            flightCode: r.flightCode
-        }))
+// Returns true only for the caller that wins the claim. Used to guarantee any
+// given carpool email goes out at most once.
+async function claimMatchNotification(key, usns) {
+    const record = { notifiedAt: Date.now(), usns };
+
+    if (firestore) {
+        try {
+            await firestore.collection(CARPOOL_COLLECTIONS.notified).doc(key).create(record);
+            return true;
+        } catch (err) {
+            if (err?.code === 6 || /ALREADY_EXISTS/i.test(err?.message || '')) return false;
+            throw err;
+        }
+    }
+    const map = carpoolMemory.get(CARPOOL_COLLECTIONS.notified);
+    if (map.has(key)) return false;
+    map.set(key, record);
+    return true;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[ch]);
+}
+
+// Indian mobiles are stored in a few shapes; normalise to a wa.me target.
+function whatsappNumber(raw) {
+    let digits = String(raw || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length === 10) digits = `91${digits}`;
+    if (digits.length === 12 && digits.startsWith('91')) return digits;
+    if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
+    return digits.length >= 11 && digits.length <= 15 ? digits : '';
+}
+
+function whatsappLink(recipient, other, match) {
+    const number = whatsappNumber(other.mobile);
+    if (!number) return '';
+
+    const where = match.direction === 'airport' ? 'to BLR airport' : 'to the hostel from BLR airport';
+    const message =
+        `Hi ${displayName(other).split(' ')[0]}! This is ${displayName(recipient).split(' ')[0]} from NST. ` +
+        `We're both heading ${where} around ${formatIstTime(other.time)}. Want to split a cab?`;
+
+    return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
+}
+
+// One shell for every carpool email, so nothing goes out as bare plain text.
+function carpoolEmailShell({ accent, avatarHtml, eyebrow, title, subtitle, rows, bodyLine, ctaHtml, footnote }) {
+    const rowHtml = rows.map(([label, value]) => `
+        <tr>
+          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:13px;color:#8A8377;">${escapeHtml(label)}</td>
+          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:14px;color:#1C1E22;font-weight:600;text-align:right;font-family:'SF Mono',Menlo,monospace;">${escapeHtml(value)}</td>
+        </tr>`).join('');
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
+
+        <tr><td style="background:${accent};padding:34px 32px 28px 32px;text-align:center;">
+          ${avatarHtml}
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:16px 0 6px 0;">${escapeHtml(eyebrow)}</div>
+          <div style="color:#ffffff;font-size:25px;font-weight:700;">${escapeHtml(title)}</div>
+          <div style="color:rgba(255,255,255,0.8);font-size:14px;margin-top:5px;">${escapeHtml(subtitle)}</div>
+        </td></tr>
+
+        <tr><td style="padding:28px 32px 8px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">${rowHtml}</table>
+        </td></tr>
+
+        <tr><td style="padding:24px 32px 6px 32px;" align="center">
+          <div style="font-size:15px;color:#5F594E;line-height:1.6;">${escapeHtml(bodyLine)}</div>
+        </td></tr>
+
+        ${ctaHtml}
+
+        <tr><td style="padding:22px 32px 30px 32px;" align="center">
+          <a href="${escapeHtml(process.env.PUBLIC_BASE_URL || '')}/carpool" style="font-size:13px;color:#9A6822;font-weight:600;text-decoration:none;">Open the carpool board &rarr;</a>
+        </td></tr>
+
+        <tr><td style="background:#F1EBDD;padding:18px 32px;text-align:center;border-top:1px solid #E7E0D0;">
+          <div style="font-size:11px;color:#8A8377;line-height:1.6;">${escapeHtml(footnote)}</div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+function otpEmailHtml(otp) {
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
+        <tr><td style="background:#9A6822;padding:26px 32px;text-align:center;">
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;">NST Carpool</div>
+          <div style="color:#ffffff;font-size:22px;font-weight:700;margin-top:6px;">Your sign-in code</div>
+        </td></tr>
+        <tr><td style="padding:34px 32px 10px 32px;" align="center">
+          <div style="font-family:'SF Mono',Menlo,monospace;font-size:38px;font-weight:700;letter-spacing:10px;color:#1C1E22;padding-left:10px;">${escapeHtml(otp)}</div>
+          <div style="font-size:13px;color:#8A8377;margin-top:16px;">This code expires in 10 minutes.</div>
+        </td></tr>
+        <tr><td style="background:#F1EBDD;padding:16px 32px;text-align:center;border-top:1px solid #E7E0D0;margin-top:20px;">
+          <div style="font-size:11px;color:#8A8377;line-height:1.6;">If you didn't try to sign in to NST Carpool, you can ignore this email.</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+function avatarFor(person, cid) {
+    const initial = escapeHtml(displayName(person).trim().charAt(0).toUpperCase() || '?');
+    return person.photo && String(person.photo).startsWith('data:image')
+        ? `<img src="cid:${cid}" width="76" height="76" alt="" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
+        : `<div style="width:76px;height:76px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;margin:0 auto;text-align:center;line-height:76px;font-size:30px;font-weight:700;color:#ffffff;">${initial}</div>`;
+}
+
+function photoAttachment(person, cid) {
+    if (!person.photo || !String(person.photo).startsWith('data:image')) return [];
+    try {
+        return [{
+            filename: 'photo.jpg',
+            content: Buffer.from(String(person.photo).split(';base64,').pop(), 'base64'),
+            cid
+        }];
+    } catch (e) {
+        console.error('Carpool photo attach failed:', e);
+        return [];
+    }
+}
+
+function whatsappCta(recipient, other, match) {
+    const wa = whatsappLink(recipient, other, match);
+    if (!wa) {
+        return `<tr><td style="padding:0 32px 8px 32px;" align="center">
+                  <div style="font-size:13px;color:#8A8377;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
+                </td></tr>`;
+    }
+    return `<tr><td style="padding:0 32px 8px 32px;" align="center">
+              <a href="${escapeHtml(wa)}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
+                Message ${escapeHtml(displayName(other).split(' ')[0])} on WhatsApp
+              </a>
+              <div style="font-size:12px;color:#8A8377;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
+            </td></tr>`;
+}
+
+function tripRows(recipient, other, match) {
+    return [
+        ['Their time', formatIstTime(other.time) + (other.flightCode ? ` \u00b7 ${other.flightCode}` : '')],
+        ['Your time', formatIstTime(recipient.time) + (recipient.flightCode ? ` \u00b7 ${recipient.flightCode}` : '')],
+        ['Gap between you', `about ${match.gapMinutes} min`]
+    ];
+}
+
+function directionAccent(direction) {
+    return direction === 'hostel' ? '#2C5F55' : '#97382C';
+}
+
+async function sendMatchAlert(recipient, other, match) {
+    const heading = match.direction === 'airport'
+        ? 'to BLR airport'
+        : 'from BLR airport back to the hostel';
+    const cid = 'carpool_photo';
+    const wa = whatsappLink(recipient, other, match);
+
+    await mailer.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: recipient.email,
+        subject: `NST Carpool: ${displayName(other)} is travelling near your time`,
+        attachments: photoAttachment(other, cid),
+        html: carpoolEmailShell({
+            accent: directionAccent(match.direction),
+            avatarHtml: avatarFor(other, cid),
+            eyebrow: 'You have a ride match',
+            title: displayName(other),
+            subtitle: `is travelling ${heading} with you`,
+            rows: tripRows(recipient, other, match),
+            bodyLine: 'Split the fare. Say hello and sort out a pickup point.',
+            ctaHtml: whatsappCta(recipient, other, match),
+            footnote: "You're both on the NST Carpool board for the same trip, so we shared your numbers to let you arrange the ride. Cancel your trip on the board to stop these emails."
+        }),
+        text: [
+            `Hi ${displayName(recipient)},`,
+            ``,
+            `${displayName(other)} is heading ${heading} around the same time as you.`,
+            ``,
+            `Their time: ${formatIstTime(other.time)}${other.flightCode ? ` (${other.flightCode})` : ''}`,
+            `Your time:  ${formatIstTime(recipient.time)}${recipient.flightCode ? ` (${recipient.flightCode})` : ''}`,
+            `Gap between you: about ${match.gapMinutes} min`,
+            ``,
+            wa ? `Message them on WhatsApp: ${wa}` : `Open the board to get in touch.`,
+            ``,
+            `Board: ${process.env.PUBLIC_BASE_URL || ''}/carpool`,
+            ``,
+            `- NST Carpool`
+        ].join('\n')
     });
-    for (const res of sseClients) {
-        res.write(`data: ${payload}\n\n`);
+}
+
+async function notifyNewMatches(usn, requests) {
+    if (!mailer) return;
+
+    const matches = buildMatches(requests).filter(match =>
+        match.users.some(user => user.usn === usn)
+    );
+
+    for (const match of matches) {
+        const [a, b] = match.users;
+        let claimed = false;
+        try {
+            claimed = await claimMatchNotification(`alert_${matchPairKey(a.usn, b.usn)}`, [a.usn, b.usn]);
+        } catch (err) {
+            console.error('Carpool match notify claim failed:', err);
+            continue;
+        }
+        if (!claimed) continue;
+
+        // The claim is kept even if a send throws: a throw doesn't prove the mail
+        // wasn't delivered, and re-sending is worse than missing one.
+        try {
+            await sendMatchAlert(a, b, match);
+        } catch (err) {
+            console.error('Carpool match alert send failed:', err);
+        }
+        try {
+            await sendMatchAlert(b, a, match);
+        } catch (err) {
+            console.error('Carpool match alert send failed:', err);
+        }
     }
 }
 
-function requireCarpoolSession(req, res, next) {
-    const authHeader = req.headers['authorization'] || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if (!token || !carpoolSessions.has(token)) {
-        return res.status(401).json({ error: 'Verification required' });
+async function requireCarpoolSession(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+        if (!token) return res.status(401).json({ error: 'Verification required' });
+
+        const session = await carpoolGet(CARPOOL_COLLECTIONS.sessions, token);
+        if (!session) return res.status(401).json({ error: 'Verification required' });
+        if (Number(session.expiresAt) <= Date.now()) {
+            await carpoolDelete(CARPOOL_COLLECTIONS.sessions, token);
+            return res.status(401).json({ error: 'Verification expired' });
+        }
+
+        req.carpoolToken = token;
+        req.carpoolUser = session;
+        next();
+    } catch (e) {
+        console.error('Carpool session lookup failed:', e);
+        res.status(500).json({ error: 'Session check failed' });
     }
-    const session = carpoolSessions.get(token);
-    if (session.expiresAt <= Date.now()) {
-        carpoolSessions.delete(token);
-        return res.status(401).json({ error: 'Verification expired' });
-    }
-    req.carpoolUser = session;
-    next();
 }
 
 app.use(helmet({
@@ -247,6 +641,22 @@ const apiLimiter = rateLimit({
     message: { error: 'Rate limit exceeded' },
 });
 
+const otpRequestLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 6,
+    message: { error: 'Too many code requests. Try again in a few minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const otpVerifyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 12,
+    message: { error: 'Too many attempts. Try again in a few minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader?.split(' ')[1];
@@ -256,6 +666,29 @@ function authenticateToken(req, res, next) {
         req.user = user;
         next();
     });
+}
+
+// Three different logins mint tokens: the shared directory password, the admin
+// OTP, and a student's own portal OTP. Verifying the signature alone is not
+// enough - without this, a student's token opens the admin directory.
+function tokenRole(user) {
+    if (user?.admin) return 'admin';
+    if (user?.a) return 'directory';
+    if (user?.student) return 'student';
+    return null;
+}
+
+function requireRole(...allowed) {
+    return (req, res, next) => {
+        authenticateToken(req, res, () => {
+            const role = tokenRole(req.user);
+            if (!role || !allowed.includes(role)) {
+                return res.status(403).json({ error: 'Not allowed' });
+            }
+            req.role = role;
+            next();
+        });
+    };
 }
 
 app.use((req, res, next) => {
@@ -274,26 +707,10 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public'), {
-    index: 'index.html',
+    index: 'carpool.html',
     dotfiles: 'deny'
 }));
 
-app.post('/api/login', authLimiter, async (req, res) => {
-    try {
-        const { password } = req.body;
-        if (!password) return res.status(400).json({ error: 'Password required' });
-        const isValid = await bcrypt.compare(password, storedPasswordHash);
-        if (!isValid) {
-            await new Promise(r => setTimeout(r, 1000));
-            return res.status(401).json({ error: 'Invalid password' });
-        }
-        const token = jwt.sign({ a: true, t: Date.now() }, JWT_SECRET, { expiresIn: '1h' });
-        res.json({ success: true, token });
-    } catch (e) {
-        console.error("Login error:", e);
-        res.status(500).json({ error: 'Server error' });
-    }
-});
 
 app.post('/api/admin/login', authLimiter, async (req, res) => {
     try {
@@ -343,7 +760,7 @@ app.post('/api/admin/verify', authLimiter, (req, res) => {
     res.json({ success: true, token });
 });
 
-app.get('/api/admin/students', apiLimiter, authenticateToken, async (req, res) => {
+app.get('/api/admin/students', apiLimiter, requireRole('admin'), async (req, res) => {
     try {
         const firebaseStudents = await loadStudentsFromFirestore();
         if (!firebaseStudents) {
@@ -356,14 +773,16 @@ app.get('/api/admin/students', apiLimiter, authenticateToken, async (req, res) =
     }
 });
 
-app.post('/api/portal/request-otp', apiLimiter, async (req, res) => {
+
+
+app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
     try {
-        const { usn } = req.body || {};
+        const usn = String(req.body?.usn || '').trim();
         if (!usn) return res.status(400).json({ error: 'USN required' });
         if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
 
-        let students = await loadStudentsFromFirestore();
-        if (!students) return res.status(500).json({ error: 'Database service offline' });
+        const students = await loadStudentsFromFirestore();
+        if (!students) return res.status(503).json({ error: 'Database service offline' });
         const student = students.find(s => s.usn === usn);
 
         if (!student || student.status === 'left') return res.status(404).json({ error: 'Student not found' });
@@ -374,312 +793,258 @@ app.post('/api/portal/request-otp', apiLimiter, async (req, res) => {
         if (!mailer) return res.status(503).json({ error: 'Email service offline' });
 
         const otp = String(crypto.randomInt(100000, 1000000));
-        otpStore.set(usn + "_portal", { otp, email, expiresAt: Date.now() + 10 * 60 * 1000 });
+        await carpoolSet(CARPOOL_COLLECTIONS.otps, usn, {
+            otp,
+            email,
+            attempts: 0,
+            expiresAt: Date.now() + CARPOOL_OTP_TTL_MS
+        });
 
         await mailer.sendMail({
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: email,
-            subject: 'NST Portal OTP',
-            text: `Your NST portal login OTP is ${otp}. It expires in 10 minutes.`
+            subject: `${otp} is your NST Carpool code`,
+            html: otpEmailHtml(otp),
+            text: `Your NST carpool code is ${otp}. It expires in 10 minutes.`
         });
 
-        res.json({ success: true, emailHint: email.replace(/(.{2})([^@]*)(@.*)/, '$1***$3') });
-    } catch (e) {
-        console.error("Portal OTP send error:", e);
-        res.status(500).json({ error: 'OTP send failed' });
-    }
-});
-
-app.post('/api/portal/verify-otp', apiLimiter, async (req, res) => {
-    try {
-        const { usn, otp } = req.body || {};
-        if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
-
-        const entry = otpStore.get(usn + "_portal");
-        if (!entry || entry.expiresAt <= Date.now()) return res.status(400).json({ error: 'OTP expired' });
-        if (entry.otp !== otp) return res.status(400).json({ error: 'OTP invalid' });
-
-        otpStore.delete(usn + "_portal");
-
-        let students = await loadStudentsFromFirestore();
-        if (!students) return res.status(500).json({ error: 'Database service offline' });
-        const student = students.find(s => s.usn === usn);
-
-        if (!student) return res.status(404).json({ error: 'Student not found' });
-
-        const token = jwt.sign({ usn, student: true, t: Date.now() }, JWT_SECRET, { expiresIn: '1h' });
-
-        res.json({ success: true, token, student });
-    } catch (e) {
-        console.error("Portal verification failed:", e);
-        res.status(500).json({ error: 'Verification failed' });
-    }
-});
-
-app.post('/api/carpool/request-otp', apiLimiter, async (req, res) => {
-    try {
-        const { usn } = req.body || {};
-        if (!usn) return res.status(400).json({ error: 'USN required' });
-        if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
-
-        let students = await loadStudentsFromFirestore();
-        if (!students) return res.status(500).json({ error: 'Database service offline' });
-        const student = students.find(s => s.usn === usn);
-
-        if (!student || student.status === 'left') return res.status(404).json({ error: 'Student not found' });
-
-        const email = student.institutional_email || student.email;
-        if (!email) return res.status(400).json({ error: 'No email found for student' });
-
-        if (!mailer) return res.status(503).json({ error: 'Email service offline' });
-
-        const otp = String(crypto.randomInt(100000, 1000000));
-        otpStore.set(usn + "_carpool", { otp, email, expiresAt: Date.now() + 10 * 60 * 1000 });
-
-        await mailer.sendMail({
-            from: process.env.SMTP_FROM || process.env.SMTP_USER,
-            to: email,
-            subject: 'NST Carpool OTP',
-            text: `Your NST carpool OTP is ${otp}. It expires in 10 minutes.`
-        });
-
-        const obscuredEmail = email.replace(/(.{2})([^@]*)(@.*)/, '$1***$3');
-        res.json({ success: true, message: `OTP sent to ${obscuredEmail}` });
+        const hint = maskEmail(email);
+        res.json({ success: true, emailHint: hint, message: `OTP sent to ${hint}` });
+        purgeExpiredCarpoolData();
     } catch (e) {
         console.error("Carpool OTP send failed:", e);
         res.status(500).json({ error: 'OTP send failed' });
     }
 });
 
-app.post('/api/carpool/verify-otp', apiLimiter, async (req, res) => {
-    const { usn, otp } = req.body || {};
-    if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
-    const entry = otpStore.get(usn + "_carpool");
-    if (!entry || entry.expiresAt <= Date.now()) return res.status(400).json({ error: 'OTP expired' });
-    if (entry.otp !== otp) return res.status(400).json({ error: 'OTP invalid' });
-
-    let name = `Student ${usn.slice(-4)}`;
-    let photo = '';
+app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
     try {
-        const students = await loadStudentsFromFirestore();
-        if (students) {
-            const student = students.find(s => s.usn === usn);
+        const usn = String(req.body?.usn || '').trim();
+        const otp = String(req.body?.otp || '').trim();
+        if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
+
+        const entry = await carpoolGet(CARPOOL_COLLECTIONS.otps, usn);
+        if (!entry || Number(entry.expiresAt) <= Date.now()) {
+            return res.status(400).json({ error: 'OTP expired. Request a new code.' });
+        }
+
+        if (!timingSafeMatch(otp, entry.otp)) {
+            const attempts = Number(entry.attempts || 0) + 1;
+            if (attempts >= CARPOOL_MAX_OTP_ATTEMPTS) {
+                await carpoolDelete(CARPOOL_COLLECTIONS.otps, usn);
+                return res.status(429).json({ error: 'Too many wrong attempts. Request a new code.' });
+            }
+            await carpoolSet(CARPOOL_COLLECTIONS.otps, usn, { ...entry, attempts });
+            const left = CARPOOL_MAX_OTP_ATTEMPTS - attempts;
+            return res.status(400).json({ error: `Invalid OTP. ${left} attempt${left === 1 ? '' : 's'} left.` });
+        }
+
+        let name = `Student ${usn.slice(-4)}`;
+        let photo = '';
+        let mobile = '';
+        try {
+            const students = await loadStudentsFromFirestore();
+            const student = students?.find(s => s.usn === usn);
             if (student) {
                 name = student.name || name;
                 photo = student.photo || photo;
+                mobile = student.mobile_number || '';
             }
+        } catch (e) {
+            console.error("Failed to load student name/photo", e);
         }
+
+        const token = makeToken();
+        await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
+            usn,
+            email: entry.email,
+            name,
+            photo,
+            mobile,
+            expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
+        });
+        await carpoolDelete(CARPOOL_COLLECTIONS.otps, usn);
+
+        res.json({ success: true, token, email: entry.email, name, photo });
     } catch (e) {
-        console.error("Failed to load student name/photo", e);
+        console.error("Carpool verification failed:", e);
+        res.status(500).json({ error: 'Verification failed' });
     }
-
-    const token = makeToken();
-    carpoolSessions.set(token, {
-        usn,
-        email: entry.email,
-        name,
-        photo,
-        expiresAt: Date.now() + 60 * 60 * 1000
-    });
-    otpStore.delete(usn + "_carpool");
-    res.json({ success: true, token, email: entry.email, name, photo });
 });
 
-app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, (req, res) => {
-    const { direction, flightCode, time, waitMinutes } = req.body || {};
-    if (!direction || !time) return res.status(400).json({ error: 'Direction and time required' });
-    const parsedTime = new Date(time);
-    if (Number.isNaN(parsedTime.getTime())) return res.status(400).json({ error: 'Invalid time' });
-
-    const existingIndex = carpoolRequests.findIndex(r => r.usn === req.carpoolUser.usn);
-    if (existingIndex !== -1) {
-        carpoolRequests.splice(existingIndex, 1);
-    }
-
-    const request = {
-        id: makeToken(),
-        usn: req.carpoolUser.usn,
-        email: req.carpoolUser.email,
-        name: req.carpoolUser.name,
-        photo: req.carpoolUser.photo,
-        direction,
-        flightCode: (flightCode || '').trim(),
-        time: parsedTime,
-        waitMinutes: Math.max(0, Number(waitMinutes || 0)),
-        createdAt: Date.now()
-    };
-    carpoolRequests.push(request);
-    publishMatches();
-    res.json({ success: true, requestId: request.id });
-});
-
-app.get('/api/carpool/status', apiLimiter, (req, res) => {
-    const matches = buildMatches();
-    res.json({
-        activeRequests: getActiveRequestsCount(),
-        matchCount: matches.length
-    });
-});
-
-app.get('/api/carpool/public-requests', apiLimiter, requireCarpoolSession, (req, res) => {
-    cleanOldEntries();
-    const hasRequest = carpoolRequests.some(r => r.usn === req.carpoolUser.usn);
-    if (!hasRequest) {
-        return res.json({
-            requests: [],
-            locked: true,
-            message: "Please join a journey to see other travelers."
-        });
-    }
-
-    res.json({
-        requests: carpoolRequests.map(r => ({
-            id: r.id,
-            name: r.name || `Student ${String(r.usn || '0000').slice(-4)}`,
-            photo: r.photo || '',
-            direction: r.direction,
-            time: r.time,
-            flightCode: r.flightCode
-        }))
-    });
-});
-
-app.get('/api/carpool/matches', apiLimiter, requireCarpoolSession, (req, res) => {
-    const allMatches = buildMatches();
-    const filtered = allMatches.filter(m =>
-        m.users.some(u => u.usn === req.carpoolUser.usn)
-    );
-
-    res.json({
-        matches: filtered.map(match => {
-            const other = match.users.find(u => u.usn !== req.carpoolUser.usn) || match.users[1];
-            return {
-                id: match.id,
-                direction: match.direction,
-                time: other.time,
-                window: match.time,
-                wait: match.wait,
-                name: other.name || `Student ${String(other.usn || '0000').slice(-4)}`
-            };
-        }),
-        activeRequests: getActiveRequestsCount(),
-        matchCount: filtered.length
-    });
-});
-
-app.post('/api/carpool/cancel', apiLimiter, requireCarpoolSession, (req, res) => {
-    const { requestId } = req.body || {};
-    if (!requestId) return res.status(400).json({ error: 'Request ID required' });
-
-    const index = carpoolRequests.findIndex(r => r.id === requestId && r.usn === req.carpoolUser.usn);
-    if (index !== -1) {
-        carpoolRequests.splice(index, 1);
-    }
-    publishMatches();
-    res.json({ success: true });
-});
-
-app.post('/api/carpool/accept', apiLimiter, requireCarpoolSession, async (req, res) => {
+app.post('/api/carpool/logout', apiLimiter, requireCarpoolSession, async (req, res) => {
     try {
-        const { matchId } = req.body || {};
-        if (!matchId) return res.status(400).json({ error: 'Match required' });
-        const matches = buildMatches();
-        const match = matches.find(item => item.id === matchId);
-        if (!match) return res.status(404).json({ error: 'Match not found' });
-        if (!mailer) return res.status(503).json({ error: 'Email service offline' });
-        const requester = req.carpoolUser;
-        const other = match.users.find(user => user.usn !== requester.usn) || match.users[0];
-        await mailer.sendMail({
-            from: process.env.SMTP_FROM || process.env.SMTP_USER,
-            to: other.email,
-            subject: 'NST Carpool match accepted',
-            text: `Hi! ${requester.usn} accepted the ride match. Contact: ${requester.email}.`
-        });
-        await mailer.sendMail({
-            from: process.env.SMTP_FROM || process.env.SMTP_USER,
-            to: requester.email,
-            subject: 'NST Carpool match sent',
-            text: `We sent your contact to ${other.usn}. Their email: ${other.email}.`
-        });
+        await carpoolDelete(CARPOOL_COLLECTIONS.sessions, req.carpoolToken);
         res.json({ success: true });
     } catch (e) {
-        console.error("Carpool accept email send failed:", e);
-        res.status(500).json({ error: 'Email send failed' });
+        console.error("Carpool logout failed:", e);
+        res.status(500).json({ error: 'Logout failed' });
     }
 });
 
-app.get('/api/carpool/stream', apiLimiter, (req, res) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
-    sseClients.add(res);
-
-    const matches = buildMatches();
-    res.write(`data: ${JSON.stringify({
-        matches: matches.map(m => ({
-            id: m.id,
-            direction: m.direction,
-            time: m.time,
-            wait: m.wait,
-            name: `Student ${String(m.users[1].usn || '0000').slice(-4)}`
-        })),
-        activeRequests: getActiveRequestsCount(),
-        publicRequests: carpoolRequests.map(r => ({
-            id: r.id,
-            name: r.name || `Student ${String(r.usn || '0000').slice(-4)}`,
-            photo: r.photo || '',
-            direction: r.direction,
-            time: r.time,
-            flightCode: r.flightCode
-        }))
-    })}\n\n`);
-
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 20000);
-    req.on('close', () => {
-        clearInterval(keepAlive);
-        sseClients.delete(res);
-    });
-});
-
-app.get('/api/verify', authenticateToken, (req, res) => {
-    res.json({ valid: true });
-});
-
-app.get('/api/students', apiLimiter, authenticateToken, async (req, res) => {
+app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req, res) => {
     try {
-        const firebaseStudents = await loadStudentsFromFirestore();
-        if (firebaseStudents) {
-            const activeStudents = firebaseStudents.filter(s => s.status !== 'left');
-            return res.json(activeStudents);
+        const { direction, flightCode, time, waitMinutes } = req.body || {};
+        if (!CARPOOL_DIRECTIONS.has(direction)) {
+            return res.status(400).json({ error: 'Pick where you are heading' });
         }
-        return res.status(500).json({ error: 'Database service offline' });
+
+        const parsedTime = parseCarpoolTime(time);
+        if (!parsedTime) return res.status(400).json({ error: 'Invalid time' });
+
+        const now = Date.now();
+        const travelTime = parsedTime.getTime();
+        if (travelTime < now - CARPOOL_TRAVEL_GRACE_MS) {
+            return res.status(400).json({ error: 'That time has already passed' });
+        }
+        if (travelTime > now + CARPOOL_MAX_FUTURE_MS) {
+            return res.status(400).json({ error: 'Pick a time within the next 30 days' });
+        }
+
+        // One live journey per student, so replace any earlier one.
+        const existing = await carpoolList(CARPOOL_COLLECTIONS.requests);
+        await Promise.all(
+            existing
+                .filter(row => row.usn === req.carpoolUser.usn)
+                .map(row => carpoolDelete(CARPOOL_COLLECTIONS.requests, row.id))
+        );
+
+        const id = makeToken();
+        const request = {
+            usn: req.carpoolUser.usn,
+            email: req.carpoolUser.email,
+            name: req.carpoolUser.name,
+            photo: req.carpoolUser.photo,
+            mobile: req.carpoolUser.mobile || '',
+            direction,
+            flightCode: sanitizeFlightCode(flightCode),
+            time: travelTime,
+            waitMinutes: normalizeWaitMinutes(waitMinutes),
+            createdAt: now
+        };
+        await carpoolSet(CARPOOL_COLLECTIONS.requests, id, request);
+        invalidateCarpoolCache();
+
+        // Tell both sides as soon as a match exists, rather than waiting for
+        // someone to happen to open the board.
+        try {
+            await notifyNewMatches(req.carpoolUser.usn, await listActiveCarpoolRequests());
+        } catch (err) {
+            console.error('Carpool match notification failed:', err);
+        }
+
+        res.json({
+            success: true,
+            requestId: id,
+            request: serializeRequest({ id, ...request }, req.carpoolUser.usn)
+        });
+        purgeExpiredCarpoolData();
     } catch (e) {
-        console.error("Firestore loading error:", e);
-        return res.status(500).json({ error: 'Error loading data' });
+        console.error("Carpool request save failed:", e);
+        res.status(500).json({ error: 'Could not save your journey' });
     }
 });
 
-app.post('/api/logout', authenticateToken, (req, res) => {
-    res.json({ success: true });
+app.get('/api/carpool/status', apiLimiter, async (req, res) => {
+    try {
+        const requests = await listActiveCarpoolRequests();
+        res.json({
+            activeRequests: requests.length,
+            matchCount: buildMatches(requests).length
+        });
+    } catch (e) {
+        console.error("Carpool status failed:", e);
+        res.status(500).json({ error: 'Status unavailable' });
+    }
 });
+
+// One authenticated snapshot of everything the dashboard renders. The board stays
+// locked until the student posts their own journey.
+app.get('/api/carpool/overview', apiLimiter, requireCarpoolSession, async (req, res) => {
+    try {
+        const viewerUsn = req.carpoolUser.usn;
+        const requests = await listActiveCarpoolRequests();
+        const mine = requests.find(row => row.usn === viewerUsn) || null;
+
+        if (!mine) {
+            return res.json({
+                locked: true,
+                message: 'Join a journey to see who else is travelling.',
+                myRequest: null,
+                requests: [],
+                matches: [],
+                activeRequests: requests.length,
+                matchCount: 0
+            });
+        }
+
+        const matches = buildMatches(requests).filter(match =>
+            match.users.some(user => user.usn === viewerUsn)
+        );
+
+        res.json({
+            locked: false,
+            myRequest: serializeRequest(mine, viewerUsn),
+            requests: requests.map(row => serializeRequest(row, viewerUsn)),
+            matches: matches.map(match => {
+                const other = match.users.find(user => user.usn !== viewerUsn);
+                return {
+                    id: match.id,
+                    // Lets the client line a match up with its row on the board.
+                    requestId: other.id,
+                    direction: match.direction,
+                    name: displayName(other),
+                    photo: other.photo || '',
+                    time: new Date(Number(other.time)).toISOString(),
+                    flightCode: other.flightCode || '',
+                    gapMinutes: match.gapMinutes,
+                    windowMinutes: match.windowMinutes,
+                    // Positive when the other traveller gets there after you do.
+                    youWaitMinutes: Math.round((Number(other.time) - Number(mine.time)) / 60000)
+                };
+            }),
+            activeRequests: requests.length,
+            matchCount: matches.length
+        });
+        purgeExpiredCarpoolData();
+    } catch (e) {
+        console.error("Carpool overview failed:", e);
+        res.status(500).json({ error: 'Could not load the board' });
+    }
+});
+
+app.post('/api/carpool/cancel', apiLimiter, requireCarpoolSession, async (req, res) => {
+    try {
+        const rows = await carpoolList(CARPOOL_COLLECTIONS.requests);
+        const mine = rows.filter(row => row.usn === req.carpoolUser.usn);
+        await Promise.all(mine.map(row => carpoolDelete(CARPOOL_COLLECTIONS.requests, row.id)));
+        invalidateCarpoolCache();
+        res.json({ success: true, removed: mine.length });
+    } catch (e) {
+        console.error("Carpool cancel failed:", e);
+        res.status(500).json({ error: 'Could not cancel your journey' });
+    }
+});
+
+
+
+
 
 // Expose Serverless Cron trigger for Vercel / GitHub Actions
 app.get('/api/cron/birthday', async (req, res) => {
     const authHeader = req.headers.authorization;
     const secretQuery = req.query.secret;
     const expectedSecret = process.env.CRON_SECRET;
-    
-    console.log(`[Cron Debug] expectedSecret: ${expectedSecret ? 'Defined (len: ' + String(expectedSecret).length + ')' : 'Undefined'}`);
-    console.log(`[Cron Debug] secretQuery: ${secretQuery ? 'Defined (len: ' + String(secretQuery).length + ')' : 'Undefined/Empty'}`);
-    console.log(`[Cron Debug] authHeader: ${authHeader ? 'Defined (len: ' + String(authHeader).length + ')' : 'Undefined/Empty'}`);
 
-    if (expectedSecret) {
-        const authorized = authHeader === `Bearer ${expectedSecret}` || secretQuery === expectedSecret;
-        if (!authorized) {
-            console.warn(`[Cron Debug] Authorization check failed. queryMatches: ${secretQuery === expectedSecret}, headerMatches: ${authHeader === 'Bearer ' + expectedSecret}`);
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+    // Fail closed. Without a secret this endpoint would let anyone fire the
+    // day's emails.
+    if (!expectedSecret) {
+        console.error('CRON_SECRET is not configured; refusing to run the birthday job.');
+        return res.status(503).json({ error: 'Cron secret not configured' });
+    }
+
+    if (authHeader !== `Bearer ${expectedSecret}` && secretQuery !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
     
     try {
@@ -696,11 +1061,19 @@ app.all('/api/*', (req, res) => {
     res.status(404).json({ error: 'Not found' });
 });
 
+app.get('/carpool', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'carpool.html'));
+});
+
 app.get('*', (req, res) => {
     if (req.path.includes('..') || req.path.includes('//')) {
         return res.status(403).json({ error: 'Access denied' });
     }
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    // A missing asset should 404, not quietly return the app shell.
+    if (/\.[a-z0-9]{2,5}$/i.test(req.path)) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    res.sendFile(path.join(__dirname, 'public', 'carpool.html'));
 });
 
 app.use((err, req, res, next) => {
@@ -720,3 +1093,29 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
+// Test-only hooks, so the carpool suite can create sessions without SMTP.
+// Deliberately gated: this mints carpool sessions and must never load in production.
+if (process.env.CARPOOL_TEST_HOOKS === '1') {
+    module.exports.__test = {
+        async mintTestSession({ usn, email, name, photo = '', mobile = '' }) {
+            const token = makeToken();
+            await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
+                usn,
+                email,
+                name,
+                photo,
+                mobile,
+                expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
+            });
+            return token;
+        },
+        async resetCarpoolForTests() {
+            for (const collection of Object.values(CARPOOL_COLLECTIONS)) {
+                const rows = await carpoolList(collection);
+                await Promise.all(rows.map(row => carpoolDelete(collection, row.id)));
+            }
+            invalidateCarpoolCache();
+        }
+    };
+}
