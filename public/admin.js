@@ -346,13 +346,9 @@ function renderStudents(students) {
                         ${s.name || 'Unknown Name'} 
                         ${s.status === 'left' ? '<span style="color:var(--error); font-size:0.8em; margin-left:5px;">(Left Batch)</span>' : ''}
                     </h4>
-                    <p>${s.usn || 'No USN'}</p>
-                    <div style="font-size: 0.8rem; color: var(--primary-500); margin-top: 4px;">
-                        ${s.email || 'No Email'}
-                    </div>
-                    <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px;">
-                        ${getMobileNumber(s) || 'No Mobile'}
-                    </div>
+                    <p class="sc-usn">${s.usn || 'No USN'}</p>
+                    <div class="sc-email" title="${s.email || ''}">${s.email || 'No email'}</div>
+                    <div class="sc-mobile">${getMobileNumber(s) || 'No mobile'}</div>
                 </div>
             </div>
         `).join('');
@@ -664,30 +660,47 @@ function openStudentModal(usn) {
             return;
         }
 
+        const portrait = s.photo
+            ? `<img src="${s.photo}" alt="" class="pc-portrait">`
+            : `<div class="pc-portrait pc-portrait-fallback">${(s.name || '?').trim().charAt(0).toUpperCase()}</div>`;
+
+        const pcLink = (url, label) => url
+            ? `<a href="${url}" target="_blank" rel="noopener noreferrer" class="pc-link">${label}</a>`
+            : '';
+
+        const pcRow = (label, value, cls = '') => `
+            <div class="pc-row">
+                <span class="pc-label">${label}</span>
+                <span class="pc-value ${cls}">${value || '&mdash;'}</span>
+            </div>`;
+
         modalBody.innerHTML = `
-                <div class="modal-profile-header">
-                    ${avatarMarkup(s, { size: 100, className: 'modal-photo' })}
-                    <h2 style="margin: 10px 0 5px;">${s.name || 'Unknown'}</h2>
-                    <p style="color: var(--primary-600); margin:0;">${s.usn}</p>
+            <div class="profile-card">
+                <div class="pc-hero">
+                    ${portrait}
+                    <div class="pc-ident">
+                        <h2 class="pc-name">${s.name || 'Unknown'}</h2>
+                        <div class="pc-usn">${s.usn || ''}</div>
+                        <div class="pc-chips">
+                            ${s.batch ? `<span class="pc-chip">${s.batch}</span>` : ''}
+                            ${s.blood_group ? `<span class="pc-chip pc-chip-blood">${s.blood_group}</span>` : ''}
+                            ${s.gender ? `<span class="pc-chip">${s.gender}</span>` : ''}
+                        </div>
+                        <div class="pc-actions">
+                            ${pcLink(s.linkedin, 'LinkedIn')}
+                            ${pcLink(s.github, 'GitHub')}
+                        </div>
+                    </div>
                 </div>
-                
-                <div class="modal-detail-row"><span class="modal-label">Batch</span> <span class="modal-value">${s.batch || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Email</span> <span class="modal-value">${s.email || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Mobile</span> <span class="modal-value">${getMobileNumber(s) || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Institutional Email</span> <span class="modal-value">${s.institutional_email || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Gender</span> <span class="modal-value">${s.gender || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Birthday</span> <span class="modal-value">${s.birthday || '-'}</span></div>
-                <div class="modal-detail-row"><span class="modal-label">Blood Group</span> <span class="modal-value" style="font-weight:600; color:var(--primary-600);">${s.blood_group || '-'}</span></div>
-                
-                <div class="modal-detail-row">
-                    <span class="modal-label">LinkedIn</span> 
-                    <span class="modal-value">${s.linkedin ? `<a href="${s.linkedin}" target="_blank" style="color:var(--primary-500)">View Profile</a>` : '-'}</span>
+
+                <div class="pc-details">
+                    ${pcRow('Birthday', s.birthday)}
+                    ${pcRow('Mobile', getMobileNumber(s), 'pc-mono')}
+                    ${pcRow('Email', s.email, 'pc-mono pc-wrap')}
+                    ${pcRow('College email', s.institutional_email, 'pc-mono pc-wrap')}
                 </div>
-                <div class="modal-detail-row" style="border-bottom: none;">
-                    <span class="modal-label">GitHub</span> 
-                    <span class="modal-value">${s.github ? `<a href="${s.github}" target="_blank" style="color:var(--primary-500)">View Profile</a>` : '-'}</span>
-                </div>
-            `;
+            </div>
+        `;
 
         studentModal.classList.remove('hidden');
     } catch (e) {

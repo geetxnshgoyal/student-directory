@@ -1,83 +1,80 @@
 /* ==========================================================================
    NST Carpool
-   A classic travel aesthetic: ticket stock and brass fittings. Direction is
-   colour-coded like an old departure board - teal arrives, oxblood departs.
+   A classic travel aesthetic: navy ink on cool paper. Direction is
+   colour-coded like an old departure board - green arrives, burgundy departs.
    Every clock time is set in mono so times align and scan down a column.
    Both themes are first-class; tokens below are the only place colour lives.
    ========================================================================== */
 
 :root {
-    --brass: #A6742A;
-    --brass-ink: #FFFFFF;
-
     --r-sm: 5px;
     --r-md: 9px;
     --r-lg: 13px;
     --r-xl: 16px;
 
-    --font-display: 'Instrument Serif', Georgia, serif;
-    --font-body: 'Instrument Sans', system-ui, sans-serif;
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-body: 'Plus Jakarta Sans', system-ui, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
     --page: 1120px;
     --ease: cubic-bezier(0.4, 0.14, 0.3, 1);
 }
 
-/* ---------- Night: warm charcoal and parchment ---------- */
+/* ---------- Night: deep navy-charcoal ---------- */
 :root,
 :root[data-theme='dark'] {
     color-scheme: dark;
 
-    --bg: #16171B;
-    --surface: #1D1F24;
-    --surface-2: #24272E;
-    --line: #33363F;
-    --line-soft: #262930;
+    --bg: #12151B;
+    --surface: #191D25;
+    --surface-2: #212630;
+    --line: #2E343F;
+    --line-soft: #232833;
 
-    --text: #EFEAE0;
-    --text-mid: #A29B90;
-    --text-dim: #756F65;
+    --text: #E8EAEE;
+    --text-mid: #99A1AE;
+    --text-dim: #6B7280;
 
-    --accent: #CE9A46;
-    --accent-ink: #1C1710;
-    --accent-wash: rgba(206, 154, 70, 0.11);
-    --accent-edge: rgba(206, 154, 70, 0.34);
-    --accent-quiet: #6A5227;
+    --accent: #6EA8DC;
+    --accent-ink: #0E1319;
+    --accent-wash: rgba(110, 168, 220, 0.10);
+    --accent-edge: rgba(110, 168, 220, 0.32);
+    --accent-quiet: #2C4560;
 
-    --arrive: #5FB39C;
-    --depart: #D9705C;
+    --arrive: #56B39A;
+    --depart: #E0736F;
 
-    --glow: rgba(0, 0, 0, 0.4);
-    --wash-1: rgba(206, 154, 70, 0.06);
-    --wash-2: rgba(95, 179, 156, 0.045);
+    --glow: rgba(0, 0, 0, 0.45);
+    --wash-1: rgba(110, 168, 220, 0.055);
+    --wash-2: rgba(86, 179, 154, 0.04);
 }
 
-/* ---------- Day: oat paper and ink ---------- */
+/* ---------- Day: cool paper and ink ---------- */
 :root[data-theme='light'] {
     color-scheme: light;
 
-    --bg: #F6F2E9;
-    --surface: #FFFDF8;
-    --surface-2: #F1EBDD;
-    --line: #DCD3C1;
-    --line-soft: #E7E0D0;
+    --bg: #F5F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EDEFF3;
+    --line: #D8DCE3;
+    --line-soft: #E4E7EC;
 
-    --text: #1C1E22;
-    --text-mid: #5F594E;
-    --text-dim: #8A8377;
+    --text: #171A1F;
+    --text-mid: #545A66;
+    --text-dim: #838A96;
 
-    --accent: #9A6822;
-    --accent-ink: #FFFCF4;
-    --accent-wash: rgba(154, 104, 34, 0.09);
-    --accent-edge: rgba(154, 104, 34, 0.3);
-    --accent-quiet: #D8C9A8;
+    --accent: #1F4C7A;
+    --accent-ink: #FFFFFF;
+    --accent-wash: rgba(31, 76, 122, 0.08);
+    --accent-edge: rgba(31, 76, 122, 0.28);
+    --accent-quiet: #C3CEDC;
 
-    --arrive: #2C5F55;
-    --depart: #97382C;
+    --arrive: #2E6B5E;
+    --depart: #8C2F39;
 
-    --glow: rgba(64, 52, 30, 0.1);
-    --wash-1: rgba(154, 104, 34, 0.05);
-    --wash-2: rgba(44, 95, 85, 0.04);
+    --glow: rgba(23, 26, 31, 0.12);
+    --wash-1: rgba(31, 76, 122, 0.045);
+    --wash-2: rgba(46, 107, 94, 0.035);
 }
 
 *,
@@ -1542,4 +1539,23 @@ input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
     .match-gap {
         margin-top: 0;
     }
+}
+
+
+/* Fraunces carries weight where Instrument Serif was used at 400. */
+.brand-name,
+.section-title,
+.pitch-headline,
+.auth-title,
+.pick-title,
+.sheet-title,
+.trip-name,
+.match-name,
+.empty-title {
+    font-weight: 700;
+}
+
+.pitch-headline {
+    font-weight: 800;
+    letter-spacing: -0.015em;
 }
