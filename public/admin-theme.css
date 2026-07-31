@@ -39,6 +39,10 @@
     --border-color: #D8DCE3;
     --border-focus: var(--primary-600);
 
+    --gray-50: #FAFBFC;
+    --gray-100: #EDEFF3;
+    --gray-200: #DDE1E8;
+
     --success: #2E6B5E;
     --success-light: #E0EDE9;
     --warning: #8A6216;
@@ -83,6 +87,10 @@
     --text-inverse: #12151B;
 
     --border-color: #2E343F;
+
+    --gray-50: #191D25;
+    --gray-100: #212630;
+    --gray-200: #2E343F;
 
     --success: #56B39A;
     --success-light: #16261F;
@@ -606,4 +614,23 @@ body {
     .pc-mono {
         font-size: 12.5px;
     }
+}
+
+
+/* Modal close control: was a bare times glyph on an un-themed grey disc, which
+   read as a bright white blob on the dark card. */
+.close-modal {
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.close-modal svg {
+    display: block;
+}
+
+.close-modal:hover {
+    background: var(--error-light);
+    border-color: var(--error);
+    color: var(--error);
 }
