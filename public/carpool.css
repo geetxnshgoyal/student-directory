@@ -1559,3 +1559,109 @@ input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
     font-weight: 800;
     letter-spacing: -0.015em;
 }
+
+/* ==========================================================================
+   Board layout
+   The two-column split left an empty half whenever there were no matches,
+   while the board itself ran as one tall single-file list. Sections now stack
+   full width and each list flows into as many columns as will fit.
+   ========================================================================== */
+.columns {
+    display: flex;
+    flex-direction: column;
+    gap: 34px;
+    /* The old grid rule set align-items:start, which in a column flex box
+       shrinks each section to its content width instead of the full page. */
+    align-items: stretch;
+}
+
+.col-main .stack,
+.board-day-rows {
+    display: grid;
+    gap: 10px;
+}
+
+.col-main .stack {
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+}
+
+.board-day-rows {
+    grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+}
+
+.board-day + .board-day {
+    margin-top: 20px;
+}
+
+.board-day-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.board-day-name {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.board-day-count {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0 7px;
+}
+
+/* The rule fills the space left of the count, tying the group together. */
+.board-day-head::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--line-soft);
+}
+
+.board-row {
+    padding: 11px 13px;
+}
+
+.board-when {
+    text-align: right;
+}
+
+@media (max-width: 640px) {
+    .board-day-rows,
+    .col-main .stack {
+        grid-template-columns: 1fr;
+    }
+
+    .rail-time {
+        font-size: clamp(34px, 11vw, 46px);
+    }
+
+    .page {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    .rail-card,
+    .sheet {
+        padding: 20px 16px;
+    }
+
+    .topbar-inner {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    .pick-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .section-head {
+        flex-wrap: wrap;
+    }
+}
