@@ -96,53 +96,47 @@ async function sendBirthdayWishEmail(mailer, student) {
     }
 
     const photoHtml = hasPhoto
-        ? `<img src="cid:${photoCid}" alt="${student.name}" style="width: 110px; height: 110px; border-radius: 50%; border: 3px solid #ffffff; object-fit: cover; display: block; margin: 0 auto 15px auto; box-shadow: 0 6px 18px rgba(0,0,0,0.3);">`
-        : `<div style="width: 110px; height: 110px; border-radius: 50%; background-color: rgba(255,255,255,0.2); border: 3px solid #ffffff; display: block; margin: 0 auto 15px auto; text-align: center; line-height: 110px; font-size: 44px; font-weight: 700; color: #ffffff; box-shadow: 0 6px 18px rgba(0,0,0,0.3);">${student.name ? student.name.charAt(0).toUpperCase() : '?'}</div>`;
+        ? `<img src="cid:${photoCid}" alt="" width="104" height="104" style="width:104px;height:104px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
+        : `<div style="width:104px;height:104px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;margin:0 auto;text-align:center;line-height:104px;font-size:42px;font-weight:700;color:#ffffff;">${student.name ? student.name.charAt(0).toUpperCase() : '?'}</div>`;
 
     const html = `
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Happy Birthday!</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #ffffff;">
-    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="padding: 40px 20px;">
-        <tr>
-            <td align="center">
-                <table width="600" border="0" cellspacing="0" cellpadding="0" style="background-color: #16171f; border: 1px solid #2a2b36; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
-                    <!-- Header Gradient Banner -->
-                    <tr>
-                        <td style="background: linear-gradient(135deg, #a855f7 0%, #ec4899 100%); padding: 45px 40px 35px 40px; text-align: center;">
-                            ${photoHtml}
-                            <h1 style="margin: 10px 0 0 0; color: #ffffff; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Happy Birthday, ${student.name}!</h1>
-                        </td>
-                    </tr>
-                    <!-- Body -->
-                    <tr>
-                        <td style="padding: 40px; text-align: center;">
-                            <p style="font-size: 17px; line-height: 1.7; color: #e2e8f0; margin: 0 0 20px 0; font-weight: 500;">
-                                Wishing you a spectacular birthday filled with happiness, learning, and exciting new creations!
-                            </p>
-                            <p style="font-size: 15px; line-height: 1.7; color: #94a3b8; margin: 0;">
-                                As a valued builder in our student community, we hope you take a moment to celebrate your amazing journey today. Keep coding, keep building, and continue to shine!
-                            </p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="background-color: #0f1016; padding: 20px; border-top: 1px solid #2a2b36; text-align: center;">
-                            <p style="font-size: 12px; color: #64748b; margin: 0;">
-                                Sent with ❤️ from the NST Bangalore Student Committee
-                             </p>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Happy Birthday</title></head>
+<body style="margin:0;padding:0;background:#F5F6F8;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFFFF;border:1px solid #E2E5EA;border-radius:16px;overflow:hidden;">
+
+        <tr><td style="background:#1F4C7A;padding:36px 32px 30px 32px;text-align:center;">
+          ${photoHtml}
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:18px 0 8px 0;">Happy birthday</div>
+          <div style="color:#ffffff;font-size:27px;font-weight:700;line-height:1.2;">${student.name}</div>
+        </td></tr>
+
+        <tr><td style="padding:30px 32px 8px 32px;" align="center">
+          <div style="font-size:16px;color:#171A1F;line-height:1.6;font-weight:600;margin-bottom:10px;">
+            Wishing you a brilliant year ahead.
+          </div>
+          <div style="font-size:14.5px;color:#545A66;line-height:1.65;">
+            From everyone at NST Bangalore. Enjoy the day, and thanks for
+            being part of what we are building here.
+          </div>
+        </td></tr>
+
+        <tr><td style="padding:26px 32px 32px 32px;" align="center">
+          <div style="font-size:13px;color:#838A96;">Have a great one.</div>
+        </td></tr>
+
+        <tr><td style="background:#EDEFF3;padding:18px 32px;text-align:center;border-top:1px solid #E2E5EA;">
+          <div style="font-size:11px;color:#838A96;line-height:1.6;">
+            Sent by the NST Bangalore Student Committee.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body></html>
     `;
 
     await mailer.sendMail({
@@ -196,13 +190,13 @@ async function sendClassmateBirthdayReminder(mailer, birthdayStudents, allStuden
         }
 
         const imgHtml = hasPhoto
-            ? `<img src="cid:${photoCid}" alt="${student.name}" style="width: 85px; height: 85px; border-radius: 50%; border: 2.5px solid #ffffff; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: block; margin: 0 auto;">`
-            : `<div style="width: 85px; height: 85px; border-radius: 50%; background-color: rgba(255,255,255,0.2); border: 2.5px solid #ffffff; text-align: center; line-height: 85px; font-size: 34px; font-weight: 700; color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: block; margin: 0 auto;">${student.name ? student.name.charAt(0).toUpperCase() : '?'}</div>`;
+            ? `<img src="cid:${photoCid}" alt="" width="84" height="84" style="width:84px;height:84px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;display:block;margin:0 auto;">`
+            : `<div style="width:84px;height:84px;border-radius:50%;background:rgba(255,255,255,0.18);border:3px solid #ffffff;text-align:center;line-height:84px;font-size:34px;font-weight:700;color:#ffffff;margin:0 auto;">${student.name ? student.name.charAt(0).toUpperCase() : '?'}</div>`;
 
         photosHtml += `
-            <div style="display: inline-block; text-align: center; margin: 10px 15px; vertical-align: top;">
+            <div style="display:inline-block;text-align:center;margin:10px 14px;vertical-align:top;">
                 ${imgHtml}
-                <div style="color: #ffffff; font-size: 14px; font-weight: 600; margin-top: 8px; text-shadow: 0 1px 4px rgba(0,0,0,0.4);">${student.name}</div>
+                <div style="color:#ffffff;font-size:14px;font-weight:600;margin-top:10px;">${student.name}</div>
             </div>
         `;
     });
@@ -234,9 +228,9 @@ async function sendClassmateBirthdayReminder(mailer, birthdayStudents, allStuden
                 const text = encodeURIComponent("Happy Birthday, " + student.name + "!");
                 const waLink = `https://wa.me/${cleaned}?text=${text}`;
                 mainWhatsappButtonHtml = `
-                    <div style="margin-top: 30px;">
-                        <a href="${waLink}" style="display: inline-block; background-color: #25d366; color: #ffffff; padding: 14px 35px; border-radius: 8px; font-weight: 600; text-decoration: none; font-size: 16px; box-shadow: 0 4px 15px rgba(37,211,102,0.3); border: none;">
-                            Wish Them 💬
+                    <div style="margin-top:26px;">
+                        <a href="${waLink}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
+                            Wish them on WhatsApp
                         </a>
                     </div>
                 `;
@@ -246,54 +240,40 @@ async function sendClassmateBirthdayReminder(mailer, birthdayStudents, allStuden
 
     const html = `
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Special Day Reminder!</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #ffffff;">
-    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="padding: 40px 20px;">
-        <tr>
-            <td align="center">
-                <table width="600" border="0" cellspacing="0" cellpadding="0" style="background-color: #16171f; border: 1px solid #2a2b36; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
-                    <!-- Header Gradient Banner with Photos -->
-                    <tr>
-                        <td style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%); padding: 40px 30px 30px 30px; text-align: center;">
-                            <div style="margin-bottom: 15px; text-align: center;">
-                                ${photosHtml}
-                            </div>
-                            <h1 style="margin: 5px 0 0 0; color: #ffffff; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Today is a Special Day!</h1>
-                        </td>
-                    </tr>
-                    <!-- Body -->
-                    <tr>
-                        <td style="padding: 40px; text-align: center;">
-                            <p style="font-size: 17px; line-height: 1.7; color: #e2e8f0; margin: 0 0 20px 0; font-weight: 500;">
-                                It's time to celebrate connection and community in our class!
-                            </p>
-                            <p style="font-size: 15px; line-height: 1.7; color: #94a3b8; margin: 0 0 25px 0;">
-                                Our classmate${isPlural ? 's' : ''} <strong style="color: #ffffff; font-weight: 600;">${namesStr}</strong> ${isPlural ? 'are' : 'is'} celebrating their birthday${isPlural ? 's' : ''} today! 🎂
-                            </p>
-                            <p style="font-size: 15px; line-height: 1.7; color: #94a3b8; margin: 0;">
-                                Take a moment to reach out, say happy birthday, and make their special day even happier. A simple wish can make a big difference!
-                            </p>
-                            ${mainWhatsappButtonHtml}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="background-color: #0f1016; padding: 20px; border-top: 1px solid #2a2b36; text-align: center;">
-                            <p style="font-size: 12px; color: #64748b; margin: 0;">
-                                Sent with ❤️ from the NST Bangalore Student Committee
-                            </p>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Special day</title></head>
+<body style="margin:0;padding:0;background:#F5F6F8;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFFFF;border:1px solid #E2E5EA;border-radius:16px;overflow:hidden;">
+
+        <tr><td style="background:#2E6B5E;padding:34px 28px 28px 28px;text-align:center;">
+          <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin-bottom:18px;">
+            ${isPlural ? "Today's birthdays" : "Today's birthday"}
+          </div>
+          ${photosHtml}
+        </td></tr>
+
+        <tr><td style="padding:30px 32px 8px 32px;" align="center">
+          <div style="font-size:17px;color:#171A1F;line-height:1.5;font-weight:600;margin-bottom:10px;">
+            ${namesStr} ${isPlural ? 'are' : 'is'} celebrating today.
+          </div>
+          <div style="font-size:14.5px;color:#545A66;line-height:1.65;">
+            Take a second to say happy birthday. It costs nothing and it
+            genuinely makes someone's day.
+          </div>
+          ${mainWhatsappButtonHtml}
+        </td></tr>
+
+        <tr><td style="background:#EDEFF3;padding:18px 32px;text-align:center;border-top:1px solid #E2E5EA;margin-top:20px;">
+          <div style="font-size:11px;color:#838A96;line-height:1.6;">
+            Sent to the batch by the NST Bangalore Student Committee.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body></html>
     `;
 
     await mailer.sendMail({

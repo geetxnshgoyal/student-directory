@@ -671,7 +671,7 @@ function openStudentModal(usn) {
         const pcRow = (label, value, cls = '') => `
             <div class="pc-row">
                 <span class="pc-label">${label}</span>
-                <span class="pc-value ${cls}">${value || '&mdash;'}</span>
+                <span class="pc-value ${cls}">${value || 'Not set'}</span>
             </div>`;
 
         modalBody.innerHTML = `

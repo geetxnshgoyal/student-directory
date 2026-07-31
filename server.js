@@ -783,7 +783,7 @@ app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
         if (!usn) return res.status(400).json({ error: 'USN required' });
         if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
 
-        // Demo account — skip DB lookup and email, just acknowledge
+        // Demo account: skip the DB lookup and the email, just acknowledge.
         if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
             return res.json({ success: true, emailHint: 'de***@svyasa-sas.edu.in', message: 'OTP sent to de***@svyasa-sas.edu.in' });
         }
@@ -830,7 +830,7 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
         const otp = String(req.body?.otp || '').trim();
         if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
 
-        // Demo account — validate against static OTP, no DB lookup
+        // Demo account: validate against the fixed code, no DB lookup.
         if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
             if (!timingSafeMatch(otp, DEMO_OTP)) {
                 return res.status(400).json({ error: 'Invalid OTP' });
