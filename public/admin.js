@@ -15,6 +15,25 @@ const searchInput = document.getElementById('search-input');
 const sortSelect = document.getElementById('sort-select');
 const genderFilter = document.getElementById('gender-filter');
 const batchFilter = document.getElementById('batch-filter');
+
+// Renders a photo, or an initial locally. The old fallback pointed at
+// via.placeholder.com, which the Content-Security-Policy blocks - every
+// student without a photo showed a broken-image icon, and each one would
+// otherwise have leaked a request to a third party.
+function avatarMarkup(student, { size = 40, className = '', style = '' } = {}) {
+    const name = student.name || 'Unknown';
+    const initial = name.trim().charAt(0).toUpperCase() || '?';
+    const box = `width:${size}px;height:${size}px;border-radius:50%;${style}`;
+
+    if (student.photo) {
+        return `<img src="${student.photo}" class="${className}" alt=""
+                     style="${box}object-fit:cover;"
+                     onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'avatar-initial ${className}',textContent:'${initial}',style:'${box}'}))">`;
+    }
+    return `<div class="avatar-initial ${className}" style="${box}">${initial}</div>`;
+}
+
+
 const birthdaysSection = document.getElementById('birthdays-section');
 const birthdaysGrid = document.getElementById('birthdays-grid');
 const studentModal = document.getElementById('student-modal');
@@ -318,9 +337,10 @@ function renderStudents(students) {
         return;
     }
 
+
     studentsGrid.innerHTML = students.map(s => `
             <div class="student-card" data-usn="${s.usn || ''}" style="cursor: pointer;">
-                <img src="${s.photo || 'https://via.placeholder.com/60'}" class="mini-photo" alt="${s.name}">
+                ${avatarMarkup(s, { size: 60, className: 'mini-photo' })}
                 <div class="student-info">
                     <h4>
                         ${s.name || 'Unknown Name'} 
@@ -370,19 +390,19 @@ function calculateStats() {
             <div class="stat-label">Total Students</div>
         </div>
         <div class="stat-card" style="cursor: pointer;" onclick="filterByStat('male')">
-            <div class="stat-value" style="color:var(--primary-600)">${males}</div>
+            <div class="stat-value">${males}</div>
             <div class="stat-label">Male</div>
         </div>
         <div class="stat-card" style="cursor: pointer;" onclick="filterByStat('female')">
-            <div class="stat-value" style="color:#ec4899">${females}</div>
+            <div class="stat-value">${females}</div>
             <div class="stat-label">Female</div>
         </div>
         <div class="stat-card" style="cursor: pointer;" onclick="filterByStat('batch 1')">
-            <div class="stat-value" style="color:var(--warning)">${batch1}</div>
+            <div class="stat-value">${batch1}</div>
             <div class="stat-label">Batch 1</div>
         </div>
         <div class="stat-card" style="cursor: pointer;" onclick="filterByStat('batch 2')">
-            <div class="stat-value" style="color:var(--success)">${batch2}</div>
+            <div class="stat-value">${batch2}</div>
             <div class="stat-label">Batch 2</div>
         </div>
     `;
@@ -503,7 +523,7 @@ function calculateStats() {
                     <div class="modal-directory-grid">
                         ${studentsForGroup.map(s => `
                             <div class="modal-directory-card" data-usn="${s.usn || ''}">
-                                <img src="${s.photo || 'https://via.placeholder.com/42'}" class="modal-directory-photo">
+                                ${avatarMarkup(s, { size: 42, className: 'modal-directory-photo' })}
                                 <div class="modal-directory-name" title="${s.name || 'Unknown'}">${s.name || 'Unknown'}</div>
                                 <div class="modal-directory-usn">${s.usn || ''}</div>
                             </div>
@@ -618,7 +638,7 @@ function checkBirthdays() {
         birthdaysSection.classList.remove('hidden');
         birthdaysGrid.innerHTML = withBirthdays.map(s => `
                 <div class="birthday-card" data-usn="${s.usn || ''}" style="cursor: pointer;">
-                    <img src="${s.photo || 'https://via.placeholder.com/40'}" style="width:40px; height:40px; border-radius:50%; margin-bottom:5px;">
+                    ${avatarMarkup(s, { size: 40, style: 'margin-bottom:5px;' })}
                     <div style="font-weight:600; font-size:0.9rem;">${s.name}</div>
                     <div style="color:var(--primary-600); font-size:0.8rem;">${s.displayDate}</div>
                     <div style="color:var(--text-secondary); font-size:0.75rem;">${s.daysUntilText}</div>
@@ -646,7 +666,7 @@ function openStudentModal(usn) {
 
         modalBody.innerHTML = `
                 <div class="modal-profile-header">
-                    <img src="${s.photo || 'https://via.placeholder.com/100'}" class="modal-photo">
+                    ${avatarMarkup(s, { size: 100, className: 'modal-photo' })}
                     <h2 style="margin: 10px 0 5px;">${s.name || 'Unknown'}</h2>
                     <p style="color: var(--primary-600); margin:0;">${s.usn}</p>
                 </div>
@@ -702,3 +722,17 @@ logoutBtn.addEventListener('click', logout);
 if (localStorage.getItem('adminToken')) {
     showDashboard();
 }
+
+// Theme. Initial value is set by an inline script in <head> to avoid a flash.
+// Shares the cp_theme key with the carpool so one choice covers both pages.
+document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = next;
+        try {
+            localStorage.setItem('cp_theme', next);
+        } catch {
+            // Private browsing; the choice just won't persist.
+        }
+    });
+});

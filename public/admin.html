@@ -11,8 +11,20 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-        href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
         rel="stylesheet">
+    <script>
+        // Set the theme before first paint so there is no flash of the wrong one.
+        (function () {
+            try {
+                var saved = localStorage.getItem('cp_theme');
+                document.documentElement.dataset.theme = saved
+                    || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            } catch (e) {
+                document.documentElement.dataset.theme = 'dark';
+            }
+        })();
+    </script>
     <style>
         /* ============================================================
            ADMIN PORTAL - REFINED UI
@@ -66,7 +78,7 @@
         }
 
         .dashboard-title h2 {
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: clamp(1.35rem, 2.5vw, 1.75rem);
             font-weight: 800;
             line-height: 1.1;
@@ -145,7 +157,7 @@
         }
 
         .stat-value {
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.9rem;
             font-weight: 800;
             color: var(--primary-600);
@@ -181,7 +193,7 @@
         .blood-group-header-text h3 {
             margin: 0;
             font-size: 1.05rem;
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-weight: 700;
             color: var(--text-primary);
         }
@@ -273,7 +285,7 @@
 
         .blood-group-card-value {
             display: block;
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.35rem;
             font-weight: 800;
             color: var(--text-primary);
@@ -353,7 +365,7 @@
             align-items: center;
             gap: 10px;
             margin: 0 0 16px;
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.2rem;
             font-weight: 800;
             color: var(--text-primary);
@@ -527,7 +539,7 @@
         .birthdays-section h3 {
             margin: 0 0 14px;
             color: var(--primary-700);
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.05rem;
             font-weight: 700;
         }
@@ -568,7 +580,7 @@
         }
 
         .grid-heading h3 {
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.1rem;
             font-weight: 700;
             color: var(--text-primary);
@@ -642,7 +654,7 @@
         .student-info h4 {
             margin: 0;
             color: var(--text-primary);
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--font-body);
             font-size: 1.05rem;
             font-weight: 700;
             white-space: nowrap;
@@ -791,6 +803,7 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="admin-theme.css">
 </head>
 
 <body>
@@ -867,6 +880,19 @@
                                 <span class="subtitle">NST Bangalore · Admin Dashboard</span>
                             </div>
                         </div>
+                        <div class="header-actions">
+                        <button type="button" class="theme-toggle" data-theme-toggle
+                            aria-label="Switch between light and dark">
+                            <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <circle cx="12" cy="12" r="4.5" />
+                                <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8" />
+                            </svg>
+                            <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+                            </svg>
+                        </button>
                         <button id="logout-btn" class="logout-btn">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -876,6 +902,7 @@
                             </svg>
                             Logout
                         </button>
+                        </div>
                     </div>
 
                     <!-- Stats overview -->
