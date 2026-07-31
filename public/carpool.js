@@ -694,7 +694,17 @@ function renderBoard(requests) {
         return;
     }
 
-    list.innerHTML = sorted.map(r => {
+    // Group by travel day. A flat list interleaves times across dates, so
+    // 10:05 am on the 2nd sits above 09:15 pm on the 2nd and 08:00 pm on the 3rd
+    // with nothing to tell them apart.
+    const days = new Map();
+    for (const r of sorted) {
+        const key = formatDate(r.time);
+        if (!days.has(key)) days.set(key, []);
+        days.get(key).push(r);
+    }
+
+    const rowHtml = (r) => {
         const arriving = r.direction === 'hostel';
         return `
             <div class="board-row ${arriving ? 'to-hostel' : 'to-airport'}${r.isYou ? ' is-you' : ''}">
@@ -709,10 +719,18 @@ function renderBoard(requests) {
                 </div>
                 <div class="board-when">
                     <div class="board-time">${timeHtml(r.time)}</div>
-                    <div class="board-date">${escapeHtml(formatDate(r.time))}</div>
                 </div>
             </div>`;
-    }).join('');
+    };
+
+    list.innerHTML = [...days].map(([day, rows]) => `
+        <section class="board-day">
+            <header class="board-day-head">
+                <span class="board-day-name">${escapeHtml(day)}</span>
+                <span class="board-day-count mono">${rows.length}</span>
+            </header>
+            <div class="board-day-rows">${rows.map(rowHtml).join('')}</div>
+        </section>`).join('');
 }
 
 const funnyMessages = {

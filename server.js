@@ -52,15 +52,17 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('he
 const otpStore = new Map();
 let adminOtpEntry = null;
 const ADMIN_DEFAULT_OTP = process.env.ADMIN_DEFAULT_OTP;
+const DEMO_USN = process.env.DEMO_USN || '';
+const DEMO_OTP = process.env.DEMO_OTP || '';
 
 const CARPOOL_OTP_TTL_MS = 10 * 60 * 1000;
-const CARPOOL_SESSION_TTL_MS = 60 * 60 * 1000;
+const CARPOOL_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 const CARPOOL_TRAVEL_GRACE_MS = 2 * 60 * 60 * 1000;
 const CARPOOL_MAX_FUTURE_MS = 30 * 24 * 60 * 60 * 1000;
 const CARPOOL_MAX_OTP_ATTEMPTS = 5;
 const CARPOOL_CACHE_MS = 5000;
 const CARPOOL_DIRECTIONS = new Set(['hostel', 'airport']);
-const CARPOOL_WAIT_CHOICES = [15, 30, 60];
+const CARPOOL_WAIT_CHOICES = [15, 30, 60, 240];
 
 const CARPOOL_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -385,16 +387,16 @@ function whatsappLink(recipient, other, match) {
 function carpoolEmailShell({ accent, avatarHtml, eyebrow, title, subtitle, rows, bodyLine, ctaHtml, footnote }) {
     const rowHtml = rows.map(([label, value]) => `
         <tr>
-          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:13px;color:#8A8377;">${escapeHtml(label)}</td>
-          <td style="padding:9px 0;border-bottom:1px solid #EFEAE0;font-size:14px;color:#1C1E22;font-weight:600;text-align:right;font-family:'SF Mono',Menlo,monospace;">${escapeHtml(value)}</td>
+          <td style="padding:9px 0;border-bottom:1px solid #E9ECF1;font-size:13px;color:#838A96;">${escapeHtml(label)}</td>
+          <td style="padding:9px 0;border-bottom:1px solid #E9ECF1;font-size:14px;color:#171A1F;font-weight:600;text-align:right;font-family:'SF Mono',Menlo,monospace;">${escapeHtml(value)}</td>
         </tr>`).join('');
 
     return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+<body style="margin:0;padding:0;background:#F5F6F8;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
     <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background:#FFFFFF;border:1px solid #E2E5EA;border-radius:16px;overflow:hidden;">
 
         <tr><td style="background:${accent};padding:34px 32px 28px 32px;text-align:center;">
           ${avatarHtml}
@@ -408,17 +410,17 @@ function carpoolEmailShell({ accent, avatarHtml, eyebrow, title, subtitle, rows,
         </td></tr>
 
         <tr><td style="padding:24px 32px 6px 32px;" align="center">
-          <div style="font-size:15px;color:#5F594E;line-height:1.6;">${escapeHtml(bodyLine)}</div>
+          <div style="font-size:15px;color:#545A66;line-height:1.6;">${escapeHtml(bodyLine)}</div>
         </td></tr>
 
         ${ctaHtml}
 
         <tr><td style="padding:22px 32px 30px 32px;" align="center">
-          <a href="${escapeHtml(process.env.PUBLIC_BASE_URL || '')}/carpool" style="font-size:13px;color:#9A6822;font-weight:600;text-decoration:none;">Open the carpool board &rarr;</a>
+          <a href="${escapeHtml(process.env.PUBLIC_BASE_URL || '')}/carpool" style="font-size:13px;color:#1F4C7A;font-weight:600;text-decoration:none;">Open the carpool board &rarr;</a>
         </td></tr>
 
-        <tr><td style="background:#F1EBDD;padding:18px 32px;text-align:center;border-top:1px solid #E7E0D0;">
-          <div style="font-size:11px;color:#8A8377;line-height:1.6;">${escapeHtml(footnote)}</div>
+        <tr><td style="background:#EDEFF3;padding:18px 32px;text-align:center;border-top:1px solid #E2E5EA;">
+          <div style="font-size:11px;color:#838A96;line-height:1.6;">${escapeHtml(footnote)}</div>
         </td></tr>
 
       </table>
@@ -430,20 +432,20 @@ function carpoolEmailShell({ accent, avatarHtml, eyebrow, title, subtitle, rows,
 function otpEmailHtml(otp) {
     return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#F6F2E9;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
+<body style="margin:0;padding:0;background:#F5F6F8;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding:32px 16px;">
     <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#FFFDF8;border:1px solid #E7E0D0;border-radius:16px;overflow:hidden;">
-        <tr><td style="background:#9A6822;padding:26px 32px;text-align:center;">
+      <table width="480" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#FFFFFF;border:1px solid #E2E5EA;border-radius:16px;overflow:hidden;">
+        <tr><td style="background:#1F4C7A;padding:26px 32px;text-align:center;">
           <div style="color:rgba(255,255,255,0.75);font-size:11px;letter-spacing:2px;text-transform:uppercase;">NST Carpool</div>
           <div style="color:#ffffff;font-size:22px;font-weight:700;margin-top:6px;">Your sign-in code</div>
         </td></tr>
         <tr><td style="padding:34px 32px 10px 32px;" align="center">
-          <div style="font-family:'SF Mono',Menlo,monospace;font-size:38px;font-weight:700;letter-spacing:10px;color:#1C1E22;padding-left:10px;">${escapeHtml(otp)}</div>
-          <div style="font-size:13px;color:#8A8377;margin-top:16px;">This code expires in 10 minutes.</div>
+          <div style="font-family:'SF Mono',Menlo,monospace;font-size:38px;font-weight:700;letter-spacing:10px;color:#171A1F;padding-left:10px;">${escapeHtml(otp)}</div>
+          <div style="font-size:13px;color:#838A96;margin-top:16px;">This code expires in 10 minutes.</div>
         </td></tr>
-        <tr><td style="background:#F1EBDD;padding:16px 32px;text-align:center;border-top:1px solid #E7E0D0;margin-top:20px;">
-          <div style="font-size:11px;color:#8A8377;line-height:1.6;">If you didn't try to sign in to NST Carpool, you can ignore this email.</div>
+        <tr><td style="background:#EDEFF3;padding:16px 32px;text-align:center;border-top:1px solid #E2E5EA;margin-top:20px;">
+          <div style="font-size:11px;color:#838A96;line-height:1.6;">If you didn't try to sign in to NST Carpool, you can ignore this email.</div>
         </td></tr>
       </table>
     </td></tr>
@@ -476,14 +478,14 @@ function whatsappCta(recipient, other, match) {
     const wa = whatsappLink(recipient, other, match);
     if (!wa) {
         return `<tr><td style="padding:0 32px 8px 32px;" align="center">
-                  <div style="font-size:13px;color:#8A8377;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
+                  <div style="font-size:13px;color:#838A96;">We don't have a mobile number on file for ${escapeHtml(displayName(other))}, so open the board to get in touch.</div>
                 </td></tr>`;
     }
     return `<tr><td style="padding:0 32px 8px 32px;" align="center">
               <a href="${escapeHtml(wa)}" style="display:inline-block;background:#25D366;color:#ffffff;padding:15px 34px;border-radius:10px;font-weight:700;font-size:16px;text-decoration:none;">
                 Message ${escapeHtml(displayName(other).split(' ')[0])} on WhatsApp
               </a>
-              <div style="font-size:12px;color:#8A8377;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
+              <div style="font-size:12px;color:#838A96;margin-top:12px;">Opens WhatsApp with a message ready to send.</div>
             </td></tr>`;
 }
 
@@ -496,7 +498,7 @@ function tripRows(recipient, other, match) {
 }
 
 function directionAccent(direction) {
-    return direction === 'hostel' ? '#2C5F55' : '#97382C';
+    return direction === 'hostel' ? '#2E6B5E' : '#8C2F39';
 }
 
 async function sendMatchAlert(recipient, other, match) {
@@ -781,6 +783,11 @@ app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
         if (!usn) return res.status(400).json({ error: 'USN required' });
         if (!/^\d{10}$/.test(usn)) return res.status(400).json({ error: 'Invalid USN' });
 
+        // Demo account: skip the DB lookup and the email, just acknowledge.
+        if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
+            return res.json({ success: true, emailHint: 'de***@svyasa-sas.edu.in', message: 'OTP sent to de***@svyasa-sas.edu.in' });
+        }
+
         const students = await loadStudentsFromFirestore();
         if (!students) return res.status(503).json({ error: 'Database service offline' });
         const student = students.find(s => s.usn === usn);
@@ -822,6 +829,25 @@ app.post('/api/carpool/verify-otp', otpVerifyLimiter, async (req, res) => {
         const usn = String(req.body?.usn || '').trim();
         const otp = String(req.body?.otp || '').trim();
         if (!usn || !otp) return res.status(400).json({ error: 'USN and OTP required' });
+
+        // Demo account: validate against the fixed code, no DB lookup.
+        if (DEMO_USN && DEMO_OTP && usn === DEMO_USN) {
+            if (!timingSafeMatch(otp, DEMO_OTP)) {
+                return res.status(400).json({ error: 'Invalid OTP' });
+            }
+            const demoName = 'Demo';
+            const demoEmail = 'demo@svyasa-sas.edu.in';
+            const token = makeToken();
+            await carpoolSet(CARPOOL_COLLECTIONS.sessions, token, {
+                usn: DEMO_USN,
+                email: demoEmail,
+                name: demoName,
+                photo: '',
+                mobile: '',
+                expiresAt: Date.now() + CARPOOL_SESSION_TTL_MS
+            });
+            return res.json({ success: true, token, email: demoEmail, name: demoName, photo: '' });
+        }
 
         const entry = await carpoolGet(CARPOOL_COLLECTIONS.otps, usn);
         if (!entry || Number(entry.expiresAt) <= Date.now()) {
@@ -925,19 +951,19 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
         await carpoolSet(CARPOOL_COLLECTIONS.requests, id, request);
         invalidateCarpoolCache();
 
-        // Tell both sides as soon as a match exists, rather than waiting for
-        // someone to happen to open the board.
-        try {
-            await notifyNewMatches(req.carpoolUser.usn, await listActiveCarpoolRequests());
-        } catch (err) {
-            console.error('Carpool match notification failed:', err);
-        }
-
         res.json({
             success: true,
             requestId: id,
             request: serializeRequest({ id, ...request }, req.carpoolUser.usn)
         });
+
+        // Answer first, then mail. Awaiting two SMTP round trips before
+        // responding left the student watching a spinner and ate into the
+        // serverless execution budget.
+        listActiveCarpoolRequests()
+            .then(rows => notifyNewMatches(req.carpoolUser.usn, rows))
+            .catch(err => console.error('Carpool match notification failed:', err));
+
         purgeExpiredCarpoolData();
     } catch (e) {
         console.error("Carpool request save failed:", e);
@@ -945,18 +971,6 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
     }
 });
 
-app.get('/api/carpool/status', apiLimiter, async (req, res) => {
-    try {
-        const requests = await listActiveCarpoolRequests();
-        res.json({
-            activeRequests: requests.length,
-            matchCount: buildMatches(requests).length
-        });
-    } catch (e) {
-        console.error("Carpool status failed:", e);
-        res.status(500).json({ error: 'Status unavailable' });
-    }
-});
 
 // One authenticated snapshot of everything the dashboard renders. The board stays
 // locked until the student posts their own journey.
