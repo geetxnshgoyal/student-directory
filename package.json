@@ -11,7 +11,7 @@
     "photos:migrate-base64:apply": "node scripts/migrate-cloudinary-photos-to-base64.js --apply"
   },
   "dependencies": {
-    "axios": "^1.13.5",
+    "axios": "^1.19.0",
     "bcryptjs": "^2.4.3",
     "cheerio": "^1.2.0",
     "csv-parser": "^3.2.0",
