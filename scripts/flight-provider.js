@@ -135,10 +135,44 @@ function stubProvider() {
             }
             return results.sort((a, b) => a.scheduledArrival - b.scheduledArrival);
         },
-        async lookup(flightNumber, date) {
+        async searchDepartures(destinationCode, date) {
+            const to = String(destinationCode || '').toUpperCase();
+            return Object.entries(STUB_FLIGHTS)
+                .filter(([number, c]) => c.origin[0] === to && isSupportedCarrier(number))
+                .map(([number, c]) => ({
+                    number,
+                    airline: c.airline,
+                    date,
+                    direction: 'departure',
+                    origin: { code: 'BLR', name: 'Bengaluru' },
+                    destination: { code: c.origin[0], name: c.origin[1] },
+                    // Mirror of the arrival fixture: same clock time, outbound.
+                    scheduledDeparture: new Date(`${date}T${c.arriveAt}:00+05:30`).getTime(),
+                    estimatedDeparture: null,
+                    scheduledArrival: null,
+                    estimatedArrival: null,
+                    actualArrival: null,
+                    status: 'scheduled',
+                    terminal: '1',
+                    belt: null
+                }))
+                .sort((a, b) => a.scheduledDeparture - b.scheduledDeparture);
+        },
+        async lookup(flightNumber, date, direction = 'Arrival') {
             const key = normaliseFlightNumber(flightNumber);
             const canned = STUB_FLIGHTS[key];
             if (!canned) return null;
+
+            if (direction === 'Departure') {
+                return {
+                    number: key, airline: canned.airline, date, direction: 'departure',
+                    origin: { code: 'BLR', name: 'Bengaluru' },
+                    destination: { code: canned.origin[0], name: canned.origin[1] },
+                    scheduledDeparture: new Date(`${date}T${canned.arriveAt}:00+05:30`).getTime(),
+                    estimatedDeparture: null, scheduledArrival: null, estimatedArrival: null,
+                    actualArrival: null, status: 'scheduled', terminal: '1', belt: null
+                };
+            }
 
             // Times are Bangalore wall clock, same as everywhere else in the app.
             const scheduledArrival = new Date(`${date}T${canned.arriveAt}:00+05:30`).getTime();
@@ -196,15 +230,25 @@ function mapAodbStatus(row) {
     return 'unknown';
 }
 
-function fromAodbRow(row, date) {
+function fromAodbRow(row, date, direction = 'Arrival') {
     const belts = row.baggageBelts || [];
     const origin = row.originAirport || {};
+    const dest = row.destinationAirport || {};
+    const outbound = direction === 'Departure';
     return {
         number: normaliseFlightNumber(row.flightNumber),
         airline: row.airline?.displayName || row.airline?.name || null,
         date,
-        origin: { code: origin.code || null, name: origin.city || origin.name || null },
-        destination: { code: HOME_AIRPORT, name: 'Bengaluru' },
+        direction: outbound ? 'departure' : 'arrival',
+        origin: outbound
+            ? { code: HOME_AIRPORT, name: 'Bengaluru' }
+            : { code: origin.code || null, name: origin.city || origin.name || null },
+        destination: outbound
+            ? { code: dest.code || null, name: dest.city || dest.name || null }
+            : { code: HOME_AIRPORT, name: 'Bengaluru' },
+        // On a departure these carry the take-off times, not the arrival ones.
+        scheduledDeparture: outbound ? parseAodbTime(row.scheduledDate) : null,
+        estimatedDeparture: outbound ? parseAodbTime(row.estimatedDate) : null,
         scheduledArrival: parseAodbTime(row.scheduledDate),
         // The feed reports one estimate that becomes the actual once landed.
         estimatedArrival: parseAodbTime(row.estimatedDate),
@@ -251,21 +295,31 @@ function blrAodbProvider({ fetchImpl = fetch, timeoutMs = 12000, cacheMs = BLR_C
 
     return {
         name: 'blr-aodb',
-        async lookup(flightNumber, date) {
+        async lookup(flightNumber, date, direction = 'Arrival') {
             const wanted = normaliseFlightNumber(flightNumber);
-            const rows = await fetchDay(date);
+            const rows = await fetchDay(date, direction);
             const row = rows.find(r => normaliseFlightNumber(r.flightNumber) === wanted);
-            return row ? fromAodbRow(row, date) : null;
+            return row ? fromAodbRow(row, date, direction) : null;
         },
         async searchArrivals(originCode, date) {
             const from = String(originCode || '').toUpperCase();
-            const rows = await fetchDay(date);
+            const rows = await fetchDay(date, 'Arrival');
             return rows
                 .filter(r => (r.originAirport?.code || '').toUpperCase() === from)
                 .filter(r => isSupportedCarrier(r.flightNumber))
-                .map(r => fromAodbRow(r, date))
+                .map(r => fromAodbRow(r, date, 'Arrival'))
                 .filter(f => Number.isFinite(f.scheduledArrival))
                 .sort((a, b) => a.scheduledArrival - b.scheduledArrival);
+        },
+        async searchDepartures(destinationCode, date) {
+            const to = String(destinationCode || '').toUpperCase();
+            const rows = await fetchDay(date, 'Departure');
+            return rows
+                .filter(r => (r.destinationAirport?.code || '').toUpperCase() === to)
+                .filter(r => isSupportedCarrier(r.flightNumber))
+                .map(r => fromAodbRow(r, date, 'Departure'))
+                .filter(f => Number.isFinite(f.scheduledDeparture))
+                .sort((a, b) => a.scheduledDeparture - b.scheduledDeparture);
         }
     };
 }
@@ -425,7 +479,19 @@ function computeReadyTime(flight, bufferMinutes) {
     return arrival + Number(bufferMinutes) * 60000;
 }
 
+/**
+ * When to walk out of the hostel for a departing flight. You want to be at the
+ * airport a set time before take-off, and the drive itself takes about an hour,
+ * so the useful moment is earlier than either number alone suggests.
+ */
+function computeLeaveTime(flight, reachBeforeMinutes, travelMinutes) {
+    const departure = flight.estimatedDeparture ?? flight.scheduledDeparture;
+    if (!Number.isFinite(departure)) return null;
+    return departure - (Number(reachBeforeMinutes) + Number(travelMinutes)) * 60000;
+}
+
 module.exports = {
+    computeLeaveTime,
     getFlightProvider,
     CARRIERS,
     ORIGIN_CITIES,
