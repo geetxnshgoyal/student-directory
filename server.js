@@ -46,7 +46,8 @@ const {
     computeReadyTime,
     normaliseFlightNumber,
     isValidFlightNumber,
-    isValidFlightDate
+    isValidFlightDate,
+    ORIGIN_CITIES
 } = require('./scripts/flight-provider');
 
 const app = express();
@@ -947,6 +948,34 @@ app.post('/api/carpool/logout', apiLimiter, requireCarpoolSession, async (req, r
     } catch (e) {
         console.error("Carpool logout failed:", e);
         res.status(500).json({ error: 'Logout failed' });
+    }
+});
+
+// Cities we offer as departure points. Static, so it costs no API calls.
+app.get('/api/carpool/flights/cities', apiLimiter, requireCarpoolSession, (req, res) => {
+    res.json({ cities: ORIGIN_CITIES });
+});
+
+// Arrivals into BLR from one city on one date, filtered to the carriers our
+// students actually fly. Two upstream calls, since the airport feed caps each
+// request at a 12 hour window.
+app.get('/api/carpool/flights/search', apiLimiter, requireCarpoolSession, async (req, res) => {
+    const from = String(req.query.from || '').trim().toUpperCase();
+    const date = String(req.query.date || '').trim();
+
+    if (!ORIGIN_CITIES.some(city => city.code === from)) {
+        return res.status(400).json({ error: 'Pick a departure city from the list' });
+    }
+    if (!isValidFlightDate(date)) {
+        return res.status(400).json({ error: 'Pick a valid date' });
+    }
+
+    try {
+        const flights = await flightProvider.searchArrivals(from, date);
+        res.json({ success: true, flights, provider: flightProvider.name });
+    } catch (err) {
+        console.error('Flight search failed:', err);
+        res.status(503).json({ error: 'Flight search is unavailable. Enter your time manually instead.' });
     }
 });
 

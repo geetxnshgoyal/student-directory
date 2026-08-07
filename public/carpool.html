@@ -249,6 +249,22 @@
                         </div>
 
                         <button type="button" id="flight-find-btn" class="btn btn-quiet">Find my flight</button>
+
+                        <p class="flight-switch">
+                            <button type="button" id="browse-city-btn" class="btn-link">
+                                Only know the city you're flying from?
+                            </button>
+                        </p>
+
+                        <div id="city-block" class="hidden">
+                            <div class="field">
+                                <label for="city-input">Flying from</label>
+                                <select id="city-input">
+                                    <option value="">Choose a city</option>
+                                </select>
+                            </div>
+                            <div id="city-results" class="city-results"></div>
+                        </div>
                         <p class="status-msg" id="flight-status" role="status" aria-live="polite"></p>
 
                         <div id="flight-result" class="flight-result hidden"></div>

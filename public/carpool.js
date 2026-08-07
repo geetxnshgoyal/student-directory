@@ -454,6 +454,7 @@ function setFlightMode(on) {
     // The optional free-text flight code is redundant once a real flight is
     // attached, and two "flight number" boxes on one form is just confusing.
     document.getElementById('manual-flight-field').classList.toggle('hidden', on);
+    document.getElementById('city-block').classList.add('hidden');
     // Drop any looked-up flight on either transition so a stale one can never
     // be submitted after the student switched away from it.
     clearFlight();
@@ -504,6 +505,70 @@ function renderFlight(flight) {
     bufferInput.addEventListener('change', paint);
     paint();
 }
+
+const cityBlock = document.getElementById('city-block');
+const cityResults = document.getElementById('city-results');
+const cityInput = document.getElementById('city-input');
+let citiesLoaded = false;
+
+async function loadCities() {
+    if (citiesLoaded) return;
+    try {
+        const data = await api('/flights/cities');
+        cityInput.innerHTML = '<option value="">Choose a city</option>'
+            + (data.cities || []).map(c =>
+                `<option value="${escapeHtml(c.code)}">${escapeHtml(c.city)} (${escapeHtml(c.code)})</option>`
+            ).join('');
+        citiesLoaded = true;
+    } catch (err) {
+        if (err.message !== 'session-expired') setStatus(flightStatus, 'Could not load cities', 'error');
+    }
+}
+
+document.getElementById('browse-city-btn').addEventListener('click', async () => {
+    cityBlock.classList.toggle('hidden');
+    if (!cityBlock.classList.contains('hidden')) await loadCities();
+});
+
+cityInput.addEventListener('change', async () => {
+    const from = cityInput.value;
+    cityResults.innerHTML = '';
+    if (!from) return;
+
+    setStatus(flightStatus, 'Finding flights...', 'neutral');
+    try {
+        const data = await api(`/flights/search?from=${encodeURIComponent(from)}&date=${encodeURIComponent(inputs.flightDate.value)}`);
+        setStatus(flightStatus, '', 'neutral');
+        const flights = data.flights || [];
+
+        if (!flights.length) {
+            cityResults.innerHTML = '<p class="field-hint">No flights found for that city and date. '
+                + 'Enter your flight number, or set your time manually.</p>';
+            return;
+        }
+
+        cityResults.innerHTML = flights.map(f => `
+            <button type="button" class="city-flight" data-number="${escapeHtml(f.number)}">
+                <span class="cf-left">
+                    <span class="cf-number">${escapeHtml(f.number)}</span>
+                    <span class="cf-airline">${escapeHtml(f.airline || '')}</span>
+                </span>
+                <span class="cf-time">${timeHtml(new Date(f.scheduledArrival).toISOString())}</span>
+            </button>`).join('');
+
+        // Selecting one just fills the number field and runs the normal lookup,
+        // so both routes into the form converge on the same confirmation card.
+        cityResults.querySelectorAll('.city-flight').forEach(btn => {
+            btn.addEventListener('click', () => {
+                inputs.flightNumber.value = btn.dataset.number;
+                cityBlock.classList.add('hidden');
+                document.getElementById('flight-find-btn').click();
+            });
+        });
+    } catch (err) {
+        if (err.message !== 'session-expired') setStatus(flightStatus, err.message || 'Search failed', 'error');
+    }
+});
 
 document.getElementById('flight-find-btn').addEventListener('click', async () => {
     const number = inputs.flightNumber.value.trim();
