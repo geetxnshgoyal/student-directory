@@ -161,6 +161,116 @@ function stubProvider() {
 }
 
 /* ------------------------------------------------------------------ *
+ * BLR's own AODB feed, which is what bengaluruairport.com itself calls.
+ *
+ * Better than any aggregator for our one airport: free, no key, and it
+ * carries the baggage belt for every landed flight. One call returns the
+ * whole day, so tracking thirty students costs the same as tracking one.
+ *
+ * It rejects requests without an Origin header ("Unknown Origin"), and the
+ * feed is large, so a day is fetched once and cached.
+ * ------------------------------------------------------------------ */
+
+const BLR_GATEWAY = 'https://gateway.bengaluruairport.com/fis/v2/api/aodb/flight-infos';
+const BLR_ORIGIN = 'https://www.bengaluruairport.com';
+const BLR_CACHE_MS = 3 * 60 * 1000;
+
+// "202608070448" is Bangalore wall clock, so pin the offset rather than
+// letting the server's own zone decide.
+function parseAodbTime(value) {
+    const raw = String(value || '');
+    if (!/^\d{12}$/.test(raw)) return null;
+    const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+        + `T${raw.slice(8, 10)}:${raw.slice(10, 12)}:00+05:30`;
+    const parsed = new Date(iso);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+function mapAodbStatus(row) {
+    const name = String(row?.flightStatus?.name || '').toUpperCase();
+    if (name.includes('CANCEL')) return 'cancelled';
+    if (name.includes('DIVERT')) return 'diverted';
+    if (name === 'ARRIVED' || name === 'LANDED') return 'landed';
+    if (name.includes('ARRIVING') || name === 'DEPARTED' || name.includes('EN ROUTE')) return 'departed';
+    if (name === 'ONTIME' || name === 'DELAYED' || name === 'SCHEDULED') return 'scheduled';
+    return 'unknown';
+}
+
+function fromAodbRow(row, date) {
+    const belts = row.baggageBelts || [];
+    const origin = row.originAirport || {};
+    return {
+        number: normaliseFlightNumber(row.flightNumber),
+        airline: row.airline?.displayName || row.airline?.name || null,
+        date,
+        origin: { code: origin.code || null, name: origin.city || origin.name || null },
+        destination: { code: HOME_AIRPORT, name: 'Bengaluru' },
+        scheduledArrival: parseAodbTime(row.scheduledDate),
+        // The feed reports one estimate that becomes the actual once landed.
+        estimatedArrival: parseAodbTime(row.estimatedDate),
+        actualArrival: mapAodbStatus(row) === 'landed' ? parseAodbTime(row.estimatedDate) : null,
+        status: mapAodbStatus(row),
+        terminal: row.terminal ? `T${String(row.terminal).replace(/^T/i, '')}` : null,
+        belt: belts.length ? String(belts[0].beltNumber) : null,
+        gate: (row.gates || []).length ? String(row.gates[0].gateNumber) : null
+    };
+}
+
+function blrAodbProvider({ fetchImpl = fetch, timeoutMs = 12000, cacheMs = BLR_CACHE_MS } = {}) {
+    const cache = new Map(); // "YYYYMMDD:Arrival" -> { at, rows }
+
+    async function fetchDay(date, direction = 'Arrival') {
+        const compact = String(date).replace(/-/g, '');
+        const key = `${compact}:${direction}`;
+        const hit = cache.get(key);
+        if (hit && Date.now() - hit.at < cacheMs) return hit.rows;
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        let res;
+        try {
+            res = await fetchImpl(`${BLR_GATEWAY}/${compact}/${direction}`, {
+                headers: {
+                    // Without this the gateway answers "Unknown Origin".
+                    Origin: BLR_ORIGIN,
+                    Referer: `${BLR_ORIGIN}/travellers/flights/flight-information`,
+                    Accept: 'application/json'
+                },
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
+
+        if (!res.ok) throw new Error(`BLR feed failed (${res.status})`);
+        const body = await res.json();
+        const rows = Array.isArray(body?.data) ? body.data : [];
+        cache.set(key, { at: Date.now(), rows });
+        return rows;
+    }
+
+    return {
+        name: 'blr-aodb',
+        async lookup(flightNumber, date) {
+            const wanted = normaliseFlightNumber(flightNumber);
+            const rows = await fetchDay(date);
+            const row = rows.find(r => normaliseFlightNumber(r.flightNumber) === wanted);
+            return row ? fromAodbRow(row, date) : null;
+        },
+        async searchArrivals(originCode, date) {
+            const from = String(originCode || '').toUpperCase();
+            const rows = await fetchDay(date);
+            return rows
+                .filter(r => (r.originAirport?.code || '').toUpperCase() === from)
+                .filter(r => isSupportedCarrier(r.flightNumber))
+                .map(r => fromAodbRow(r, date))
+                .filter(f => Number.isFinite(f.scheduledArrival))
+                .sort((a, b) => a.scheduledArrival - b.scheduledArrival);
+        }
+    };
+}
+
+/* ------------------------------------------------------------------ *
  * AeroDataBox via RapidAPI.
  * ------------------------------------------------------------------ */
 
@@ -295,9 +405,13 @@ function aeroDataBoxProvider(apiKey, { fetchImpl = fetch, timeoutMs = 8000 } = {
 /* ------------------------------------------------------------------ */
 
 function getFlightProvider(env = process.env) {
-    const key = env.FLIGHT_API_KEY;
-    if (key) return aeroDataBoxProvider(key);
-    return stubProvider();
+    // BLR's own feed first: free, no key, and the only source that reliably
+    // carries the baggage belt. FLIGHT_PROVIDER=stub forces canned data for
+    // tests and offline work; an AeroDataBox key is kept as an alternative.
+    const choice = String(env.FLIGHT_PROVIDER || '').toLowerCase();
+    if (choice === 'stub') return stubProvider();
+    if (choice === 'aerodatabox' && env.FLIGHT_API_KEY) return aeroDataBoxProvider(env.FLIGHT_API_KEY);
+    return blrAodbProvider();
 }
 
 /**
@@ -320,6 +434,9 @@ module.exports = {
     isSupportedCarrier,
     stubProvider,
     aeroDataBoxProvider,
+    blrAodbProvider,
+    parseAodbTime,
+    mapAodbStatus,
     computeReadyTime,
     normaliseFlightNumber,
     isValidFlightNumber,
