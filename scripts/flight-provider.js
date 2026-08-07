@@ -348,8 +348,18 @@ function mapAeroStatus(raw) {
     return STATUSES.has(value) ? value : 'unknown';
 }
 
-function aeroDataBoxProvider(apiKey, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+function aeroDataBoxProvider(apiKey, { fetchImpl = fetch, timeoutMs = 8000, minGapMs = 1100 } = {}) {
+    // The free tier allows one request per second. A day of arrivals is two
+    // windowed calls, so firing them back to back earns a 429.
+    let lastCallAt = 0;
+    async function throttle() {
+        const wait = lastCallAt + minGapMs - Date.now();
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+        lastCallAt = Date.now();
+    }
+
     async function getJson(url) {
+        await throttle();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         let res;
