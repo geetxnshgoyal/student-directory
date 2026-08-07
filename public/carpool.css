@@ -1826,3 +1826,55 @@ input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
     color: var(--text-dim);
     margin: 0 4px;
 }
+
+/* ============================ Phone fixes ============================ */
+@media (max-width: 560px) {
+    /* "NST Carpool" and "Sign out" were both wrapping to two lines. */
+    .brand-name {
+        white-space: nowrap;
+        font-size: 17px;
+    }
+
+    .topbar-inner {
+        gap: 10px;
+    }
+
+    .topbar-right {
+        gap: 8px;
+    }
+
+    .btn-quiet {
+        white-space: nowrap;
+        padding: 9px 12px;
+    }
+
+    /* Two links plus a separator do not fit on one line; stack them and drop
+       the dot rather than leaving it orphaned at the end of the first row. */
+    .flight-switch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        margin-top: 18px;
+        margin-bottom: 22px;
+    }
+
+    .switch-sep {
+        display: none;
+    }
+
+    /* The flight list needs air before the next control. */
+    .city-results:not(:empty) {
+        margin-bottom: 4px;
+    }
+
+    /* A 115-option native picker is fine on a phone, but give it room. */
+    #city-input,
+    .field select {
+        font-size: 16px; /* stops iOS zooming the page on focus */
+    }
+
+    .field input {
+        font-size: 16px;
+    }
+}
