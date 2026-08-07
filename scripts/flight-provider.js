@@ -197,25 +197,33 @@ function stubProvider() {
 /* ------------------------------------------------------------------ *
  * BLR's own AODB feed, which is what bengaluruairport.com itself calls.
  *
- * Better than any aggregator for our one airport: free, no key, and it
- * carries the baggage belt for every landed flight. One call returns the
- * whole day, so tracking thirty students costs the same as tracking one.
+ * NOT the default, for two reasons found the hard way:
  *
- * It rejects requests without an Origin header ("Unknown Origin"), and the
- * feed is large, so a day is fetched once and cached.
+ *   1. It is actively defended. After a modest number of server-side calls the
+ *      gateway starts answering 403 {"message":"API-Tools not allowed!"}, which
+ *      is an explicit statement that programmatic access is unwelcome. A
+ *      datacentre IP will trip this sooner than a browser does.
+ *   2. It only carries the near-present. Requesting tomorrow returns an empty
+ *      list, so it cannot answer "my flight is next Tuesday", which is most of
+ *      what students actually post.
+ *
+ * Kept behind FLIGHT_PROVIDER=blr-aodb because it is the only source with a
+ * reliable baggage belt, and it may be useful for same-day enrichment from a
+ * residential IP. Do not build the product on it.
  * ------------------------------------------------------------------ */
 
 const BLR_GATEWAY = 'https://gateway.bengaluruairport.com/fis/v2/api/aodb/flight-infos';
 const BLR_ORIGIN = 'https://www.bengaluruairport.com';
 const BLR_CACHE_MS = 3 * 60 * 1000;
 
-// "202608070448" is Bangalore wall clock, so pin the offset rather than
-// letting the server's own zone decide.
+// These are UTC, not Bangalore wall clock. Confirmed against the airport's own
+// page: it renders 09:55 IST for a row whose raw value is 202608080425, which
+// is the 5:30 offset exactly. Parsing them as local shifted every time back.
 function parseAodbTime(value) {
     const raw = String(value || '');
     if (!/^\d{12}$/.test(raw)) return null;
     const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
-        + `T${raw.slice(8, 10)}:${raw.slice(10, 12)}:00+05:30`;
+        + `T${raw.slice(8, 10)}:${raw.slice(10, 12)}:00Z`;
     const parsed = new Date(iso);
     return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
 }
@@ -459,13 +467,13 @@ function aeroDataBoxProvider(apiKey, { fetchImpl = fetch, timeoutMs = 8000 } = {
 /* ------------------------------------------------------------------ */
 
 function getFlightProvider(env = process.env) {
-    // BLR's own feed first: free, no key, and the only source that reliably
-    // carries the baggage belt. FLIGHT_PROVIDER=stub forces canned data for
-    // tests and offline work; an AeroDataBox key is kept as an alternative.
+    // AeroDataBox is the default: licensed, documented, and it answers for
+    // future dates, which the airport feed does not. blr-aodb stays opt-in.
     const choice = String(env.FLIGHT_PROVIDER || '').toLowerCase();
     if (choice === 'stub') return stubProvider();
-    if (choice === 'aerodatabox' && env.FLIGHT_API_KEY) return aeroDataBoxProvider(env.FLIGHT_API_KEY);
-    return blrAodbProvider();
+    if (choice === 'blr-aodb') return blrAodbProvider();
+    if (env.FLIGHT_API_KEY) return aeroDataBoxProvider(env.FLIGHT_API_KEY);
+    return stubProvider();
 }
 
 /**

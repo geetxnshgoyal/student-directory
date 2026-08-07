@@ -50,6 +50,7 @@ const {
     isValidFlightDate,
     ORIGIN_CITIES
 } = require('./scripts/flight-provider');
+const { getTravelEstimator } = require('./scripts/travel-time');
 
 const app = express();
 // Vercel terminates TLS in front of us. Without this every request looks like it
@@ -76,10 +77,12 @@ const CARPOOL_WAIT_CHOICES = [15, 30, 60, 240];
 const CARPOOL_BUFFER_CHOICES = [10, 20, 25, 35, 45];
 const CARPOOL_DEFAULT_BUFFER = 25;
 // Outbound: how early you want to be at the airport, and the drive itself.
+// 180 covers wanting time in the lounge; 120 is the usual domestic cushion.
 const CARPOOL_REACH_CHOICES = [90, 120, 150, 180];
 const CARPOOL_DEFAULT_REACH = 120;
-const CARPOOL_TRAVEL_CHOICES = [45, 60, 75, 90];
-const CARPOOL_DEFAULT_TRAVEL = 60;
+// Hostel to KIA is about 1h30 clear, and 1h45 or worse once traffic bites.
+const CARPOOL_TRAVEL_CHOICES = [75, 90, 105, 120];
+const CARPOOL_DEFAULT_TRAVEL = 90;
 
 const CARPOOL_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -109,6 +112,9 @@ const mailer = smtpConfig.host && smtpConfig.auth ? nodemailer.createTransport(s
 // Falls back to canned flights when FLIGHT_API_KEY is absent, so the feature is
 // always exercisable locally and never becomes a hard dependency.
 const flightProvider = getFlightProvider();
+// Live traffic when GOOGLE_MAPS_API_KEY and HOSTEL_LATLNG are set, a flat
+// estimate otherwise. Advisory either way: the student can always override it.
+const travelEstimator = getTravelEstimator();
 
 let firestore = null;
 try {
@@ -998,6 +1004,21 @@ app.get('/api/carpool/flights/search', apiLimiter, requireCarpoolSession, async 
     } catch (err) {
         console.error('Flight search failed:', err);
         res.status(503).json({ error: 'Flight search is unavailable. Enter your time manually instead.' });
+    }
+});
+
+// What the hostel to airport drive is likely to take at a given moment.
+app.get('/api/carpool/travel-estimate', apiLimiter, requireCarpoolSession, async (req, res) => {
+    const at = Number(req.query.at);
+    try {
+        const estimate = await travelEstimator.estimate(Number.isFinite(at) ? at : Date.now());
+        res.json({ success: true, ...estimate });
+    } catch (err) {
+        console.error('Travel estimate failed:', err);
+        // Advisory only, so a failure degrades to the flat default rather than
+        // blocking the form.
+        res.json({ success: true, minutes: CARPOOL_DEFAULT_TRAVEL, staticMinutes: CARPOOL_DEFAULT_TRAVEL,
+            trafficDelayMinutes: 0, source: 'fallback' });
     }
 });
 

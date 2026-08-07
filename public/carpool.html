@@ -234,45 +234,43 @@
                 </div>
 
                 <form id="create-request-form" novalidate>
-                    <!-- Inbound: look the flight up so the time comes from the airline -->
+                    <!-- City first: most students know where they're flying from
+                         long before they can recite a flight number. -->
                     <div id="flight-block" class="hidden">
                         <div class="field-row">
                             <div class="field">
-                                <label for="flight-number-input">Flight number</label>
-                                <input type="text" id="flight-number-input" class="mono" placeholder="6E 2134"
-                                    maxlength="8" autocomplete="off" autocapitalize="characters">
-                            </div>
-                            <div class="field">
-                                <label for="flight-date-input">Date of arrival</label>
-                                <input type="date" id="flight-date-input">
-                            </div>
-                        </div>
-
-                        <button type="button" id="flight-find-btn" class="btn btn-quiet">Find my flight</button>
-
-                        <p class="flight-switch">
-                            <button type="button" id="browse-city-btn" class="btn-link">
-                                Only know the city you're flying from?
-                            </button>
-                        </p>
-
-                        <div id="city-block" class="hidden">
-                            <div class="field">
-                                <label for="city-input">Flying from</label>
+                                <label for="city-input" id="city-label">Flying from</label>
                                 <select id="city-input">
                                     <option value="">Choose a city</option>
                                 </select>
                             </div>
-                            <div id="city-results" class="city-results"></div>
+                            <div class="field">
+                                <label for="flight-date-input" id="flight-date-label">Date of arrival</label>
+                                <input type="date" id="flight-date-input">
+                            </div>
                         </div>
-                        <p class="status-msg" id="flight-status" role="status" aria-live="polite"></p>
 
+                        <div id="city-results" class="city-results"></div>
+
+                        <!-- Secondary: straight to the number if they know it -->
+                        <div id="number-block" class="hidden">
+                            <div class="field">
+                                <label for="flight-number-input">Flight number</label>
+                                <div class="field-inline">
+                                    <input type="text" id="flight-number-input" class="mono" placeholder="6E 2134"
+                                        maxlength="8" autocomplete="off" autocapitalize="characters">
+                                    <button type="button" id="flight-find-btn" class="btn btn-quiet">Find</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p class="status-msg" id="flight-status" role="status" aria-live="polite"></p>
                         <div id="flight-result" class="flight-result hidden"></div>
 
                         <p class="flight-switch">
-                            <button type="button" id="use-manual-btn" class="btn-link">
-                                Don't know it? Enter your time manually
-                            </button>
+                            <button type="button" id="use-number-btn" class="btn-link">Know your flight number?</button>
+                            <span class="switch-sep" aria-hidden="true">&middot;</span>
+                            <button type="button" id="use-manual-btn" class="btn-link">Enter time manually</button>
                         </p>
                     </div>
 

@@ -231,10 +231,14 @@ function showForm(mode = 'create') {
     setStatus(document.getElementById('trip-status'), '', 'neutral');
     inputs.time.min = istInputNow();
 
-    // Inbound defaults to flight tracking; outbound has no flight to track.
-    setFlightMode(isHostel && !editing);
+    document.getElementById('city-label').textContent = isHostel ? 'Flying from' : 'Flying to';
+    document.getElementById('flight-date-label').textContent = isHostel ? 'Date of arrival' : 'Date of departure';
     inputs.flightNumber.value = '';
     inputs.flightDate.value = istInputNow().slice(0, 10);
+    cityInput.value = '';
+    document.getElementById('city-results').innerHTML = '';
+    // Both directions are now timed from a flight, so default to it either way.
+    setFlightMode(!editing);
 
     if (editing && state.myRequest) {
         inputs.time.value = isoToIstInput(state.myRequest.time);
@@ -440,24 +444,23 @@ document.getElementById('edit-request-btn').addEventListener('click', () => {
 // ---------------------------------------------------------------- Flight lookup
 const flightBlock = document.getElementById('flight-block');
 const manualBlock = document.getElementById('manual-block');
+const numberBlock = document.getElementById('number-block');
 const flightResult = document.getElementById('flight-result');
 const flightStatus = document.getElementById('flight-status');
 const backToFlightRow = document.getElementById('back-to-flight-row');
+const cityResults = document.getElementById('city-results');
+const cityInput = document.getElementById('city-input');
+let citiesLoaded = false;
 
-// Inbound trips can be timed from the airline. Outbound is about when you leave
-// the hostel, so it stays a plain time.
 function setFlightMode(on) {
     state.flightMode = on;
     flightBlock.classList.toggle('hidden', !on);
     manualBlock.classList.toggle('hidden', on);
-    backToFlightRow.classList.toggle('hidden', on || state.direction !== 'hostel');
-    // The optional free-text flight code is redundant once a real flight is
-    // attached, and two "flight number" boxes on one form is just confusing.
+    backToFlightRow.classList.toggle('hidden', on);
     document.getElementById('manual-flight-field').classList.toggle('hidden', on);
-    document.getElementById('city-block').classList.add('hidden');
-    // Drop any looked-up flight on either transition so a stale one can never
-    // be submitted after the student switched away from it.
+    numberBlock.classList.add('hidden');
     clearFlight();
+    if (on) loadCities();
 }
 
 function clearFlight() {
@@ -466,50 +469,6 @@ function clearFlight() {
     flightResult.innerHTML = '';
     setStatus(flightStatus, '', 'neutral');
 }
-
-function renderFlight(flight) {
-    const lands = formatTime(flight.scheduledArrival ? new Date(flight.scheduledArrival).toISOString() : null);
-    const route = [flight.origin?.name || flight.origin?.code, flight.destination?.name || flight.destination?.code]
-        .filter(Boolean).join(' to ');
-
-    flightResult.innerHTML = `
-        <div class="fr-head">
-            <span class="fr-number">${escapeHtml(flight.number)}</span>
-            <span class="fr-airline">${escapeHtml(flight.airline || '')}</span>
-        </div>
-        <div class="fr-route">${escapeHtml(route)}</div>
-        <div class="fr-lands">Lands ${escapeHtml(lands)}${flight.terminal ? ` &middot; Terminal ${escapeHtml(flight.terminal)}` : ''}</div>
-
-        <div class="fr-buffer">
-            <div class="field" style="margin-bottom:0;">
-                <label for="buffer-input">I'll be out of the terminal</label>
-                <select id="buffer-input">
-                    <option value="10">10 min after landing (hand baggage only)</option>
-                    <option value="20">20 min after landing</option>
-                    <option value="25" selected>25 min after landing</option>
-                    <option value="35">35 min after landing (checked bag)</option>
-                    <option value="45">45 min after landing</option>
-                </select>
-            </div>
-            <p class="fr-ready" id="fr-ready"></p>
-        </div>
-    `;
-    flightResult.classList.remove('hidden');
-
-    const bufferInput = document.getElementById('buffer-input');
-    const paint = () => {
-        const ready = new Date(flight.scheduledArrival + Number(bufferInput.value) * 60000).toISOString();
-        document.getElementById('fr-ready').innerHTML =
-            `Matching you for <strong>${timeHtml(ready)}</strong>`;
-    };
-    bufferInput.addEventListener('change', paint);
-    paint();
-}
-
-const cityBlock = document.getElementById('city-block');
-const cityResults = document.getElementById('city-results');
-const cityInput = document.getElementById('city-input');
-let citiesLoaded = false;
 
 async function loadCities() {
     if (citiesLoaded) return;
@@ -525,78 +484,163 @@ async function loadCities() {
     }
 }
 
-document.getElementById('browse-city-btn').addEventListener('click', async () => {
-    cityBlock.classList.toggle('hidden');
-    if (!cityBlock.classList.contains('hidden')) await loadCities();
-});
+// Inbound picks an arrival time and a baggage buffer; outbound works back from
+// take-off through the airport cushion and the drive.
+function renderFlight(flight) {
+    const inbound = state.direction === 'hostel';
+    const base = inbound ? flight.scheduledArrival : flight.scheduledDeparture;
+    const when = formatTime(base ? new Date(base).toISOString() : null);
+    const route = inbound
+        ? `${flight.origin?.name || flight.origin?.code} to Bengaluru`
+        : `Bengaluru to ${flight.destination?.name || flight.destination?.code}`;
+
+    const controls = inbound
+        ? `<div class="field" style="margin-bottom:0;">
+               <label for="buffer-input">I'll be out of the terminal</label>
+               <select id="buffer-input">
+                   <option value="10">10 min after landing (hand baggage)</option>
+                   <option value="20">20 min after landing</option>
+                   <option value="25" selected>25 min after landing</option>
+                   <option value="35">35 min after landing (checked bag)</option>
+                   <option value="45">45 min after landing</option>
+               </select>
+           </div>`
+        : `<div class="field">
+               <label for="reach-input">Be at the airport</label>
+               <select id="reach-input">
+                   <option value="90">1 h 30 m before departure</option>
+                   <option value="120" selected>2 h before departure</option>
+                   <option value="150">2 h 30 m before departure</option>
+                   <option value="180">3 h before departure (lounge)</option>
+               </select>
+           </div>
+           <div class="field" style="margin-bottom:0;">
+               <label for="travel-input">Drive to the airport</label>
+               <select id="travel-input">
+                   <option value="75">1 h 15 m</option>
+                   <option value="90" selected>1 h 30 m</option>
+                   <option value="105">1 h 45 m (traffic)</option>
+                   <option value="120">2 h</option>
+               </select>
+               <p class="field-hint" id="traffic-hint"></p>
+           </div>`;
+
+    flightResult.innerHTML = `
+        <div class="fr-head">
+            <span class="fr-number">${escapeHtml(flight.number)}</span>
+            <span class="fr-airline">${escapeHtml(flight.airline || '')}</span>
+        </div>
+        <div class="fr-route">${escapeHtml(route)}</div>
+        <div class="fr-lands">${inbound ? 'Lands' : 'Departs'} ${escapeHtml(when)}${flight.terminal ? ` &middot; Terminal ${escapeHtml(String(flight.terminal).replace(/^T/i, ''))}` : ''}</div>
+        <div class="fr-buffer">${controls}<p class="fr-ready" id="fr-ready"></p></div>
+    `;
+    flightResult.classList.remove('hidden');
+
+    const paint = () => {
+        let moment;
+        if (inbound) {
+            moment = base + Number(document.getElementById('buffer-input').value) * 60000;
+        } else {
+            const lead = Number(document.getElementById('reach-input').value)
+                + Number(document.getElementById('travel-input').value);
+            moment = base - lead * 60000;
+        }
+        document.getElementById('fr-ready').innerHTML = inbound
+            ? `Matching you for <strong>${timeHtml(new Date(moment).toISOString())}</strong>`
+            : `Leave the hostel at <strong>${timeHtml(new Date(moment).toISOString())}</strong>`;
+        if (!inbound) suggestTraffic(moment);
+    };
+
+    flightResult.querySelectorAll('select').forEach(sel => sel.addEventListener('change', paint));
+    paint();
+}
+
+// Advisory only: a flat estimate is wrong twice a day on this road, but a
+// failed lookup must never stop the form.
+async function suggestTraffic(leaveAt) {
+    const hint = document.getElementById('traffic-hint');
+    if (!hint) return;
+    try {
+        const data = await api(`/travel-estimate?at=${Math.round(leaveAt)}`);
+        hint.textContent = data.source === 'google-routes'
+            ? `Maps says about ${data.minutes} min at that hour`
+                + (data.trafficDelayMinutes > 5 ? ` (${data.trafficDelayMinutes} min of traffic)` : '')
+            : '';
+    } catch {
+        hint.textContent = '';
+    }
+}
+
+async function runLookup(number) {
+    setStatus(flightStatus, 'Looking it up...', 'neutral');
+    clearFlight();
+    try {
+        const data = await api(`/flights?number=${encodeURIComponent(number)}`
+            + `&date=${encodeURIComponent(inputs.flightDate.value)}`
+            + `&direction=${state.direction === 'hostel' ? 'Arrival' : 'Departure'}`);
+        state.flight = data.flight;
+        setStatus(flightStatus, '', 'neutral');
+        renderFlight(data.flight);
+    } catch (err) {
+        if (err.message === 'session-expired') return;
+        setStatus(flightStatus, err.message || 'Lookup failed', 'error');
+    }
+}
 
 cityInput.addEventListener('change', async () => {
-    const from = cityInput.value;
+    const city = cityInput.value;
     cityResults.innerHTML = '';
-    if (!from) return;
+    clearFlight();
+    if (!city) return;
 
+    const inbound = state.direction === 'hostel';
     setStatus(flightStatus, 'Finding flights...', 'neutral');
     try {
-        const data = await api(`/flights/search?from=${encodeURIComponent(from)}&date=${encodeURIComponent(inputs.flightDate.value)}`);
+        const path = inbound
+            ? `/flights/search?from=${encodeURIComponent(city)}`
+            : `/flights/departures?to=${encodeURIComponent(city)}`;
+        const data = await api(`${path}&date=${encodeURIComponent(inputs.flightDate.value)}`);
         setStatus(flightStatus, '', 'neutral');
         const flights = data.flights || [];
 
         if (!flights.length) {
             cityResults.innerHTML = '<p class="field-hint">No flights found for that city and date. '
-                + 'Enter your flight number, or set your time manually.</p>';
+                + 'Try the flight number, or set your time manually.</p>';
             return;
         }
 
-        cityResults.innerHTML = flights.map(f => `
-            <button type="button" class="city-flight" data-number="${escapeHtml(f.number)}">
+        cityResults.innerHTML = flights.map(f => {
+            const at = inbound ? f.scheduledArrival : f.scheduledDeparture;
+            return `<button type="button" class="city-flight" data-number="${escapeHtml(f.number)}">
                 <span class="cf-left">
                     <span class="cf-number">${escapeHtml(f.number)}</span>
                     <span class="cf-airline">${escapeHtml(f.airline || '')}</span>
                 </span>
-                <span class="cf-time">${timeHtml(new Date(f.scheduledArrival).toISOString())}</span>
-            </button>`).join('');
+                <span class="cf-time">${timeHtml(new Date(at).toISOString())}</span>
+            </button>`;
+        }).join('');
 
-        // Selecting one just fills the number field and runs the normal lookup,
-        // so both routes into the form converge on the same confirmation card.
         cityResults.querySelectorAll('.city-flight').forEach(btn => {
-            btn.addEventListener('click', () => {
-                inputs.flightNumber.value = btn.dataset.number;
-                cityBlock.classList.add('hidden');
-                document.getElementById('flight-find-btn').click();
-            });
+            btn.addEventListener('click', () => runLookup(btn.dataset.number));
         });
     } catch (err) {
         if (err.message !== 'session-expired') setStatus(flightStatus, err.message || 'Search failed', 'error');
     }
 });
 
-document.getElementById('flight-find-btn').addEventListener('click', async () => {
+document.getElementById('flight-find-btn').addEventListener('click', () => {
     const number = inputs.flightNumber.value.trim();
-    const date = inputs.flightDate.value;
-    if (!number || !date) {
-        setStatus(flightStatus, 'Enter your flight number and date', 'error');
+    if (!number) {
+        setStatus(flightStatus, 'Enter your flight number', 'error');
         return;
     }
-
-    const btn = document.getElementById('flight-find-btn');
-    btn.disabled = true;
-    setStatus(flightStatus, 'Looking it up...', 'neutral');
-    clearFlight();
-
-    try {
-        const data = await api(`/flights?number=${encodeURIComponent(number)}&date=${encodeURIComponent(date)}`);
-        state.flight = data.flight;
-        setStatus(flightStatus, '', 'neutral');
-        renderFlight(data.flight);
-    } catch (err) {
-        if (err.message === 'session-expired') return;
-        // Every failure path offers the manual route rather than dead-ending.
-        setStatus(flightStatus, err.message || 'Lookup failed', 'error');
-    } finally {
-        btn.disabled = false;
-    }
+    runLookup(number);
 });
 
+document.getElementById('use-number-btn').addEventListener('click', () => {
+    numberBlock.classList.toggle('hidden');
+    if (!numberBlock.classList.contains('hidden')) inputs.flightNumber.focus();
+});
 document.getElementById('use-manual-btn').addEventListener('click', () => setFlightMode(false));
 document.getElementById('use-flight-btn').addEventListener('click', () => setFlightMode(true));
 
@@ -612,8 +656,13 @@ forms.trip.addEventListener('submit', async (e) => {
             direction: state.direction,
             flightNumber: state.flight.number,
             flightDate: state.flight.date,
-            bufferMinutes: Number(document.getElementById('buffer-input')?.value || 25),
-            waitMinutes: inputs.wait.value
+            waitMinutes: inputs.wait.value,
+            ...(state.direction === 'hostel'
+                ? { bufferMinutes: Number(document.getElementById('buffer-input')?.value || 25) }
+                : {
+                    reachMinutes: Number(document.getElementById('reach-input')?.value || 120),
+                    travelMinutes: Number(document.getElementById('travel-input')?.value || 90)
+                })
         };
     } else {
         const isoTime = istInputToIso(inputs.time.value);
