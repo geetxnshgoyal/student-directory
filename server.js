@@ -41,6 +41,13 @@ const nodemailer = require('nodemailer');
 const crypto = require('node:crypto');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
+const {
+    getFlightProvider,
+    computeReadyTime,
+    normaliseFlightNumber,
+    isValidFlightNumber,
+    isValidFlightDate
+} = require('./scripts/flight-provider');
 
 const app = express();
 // Vercel terminates TLS in front of us. Without this every request looks like it
@@ -63,6 +70,9 @@ const CARPOOL_MAX_OTP_ATTEMPTS = 5;
 const CARPOOL_CACHE_MS = 5000;
 const CARPOOL_DIRECTIONS = new Set(['hostel', 'airport']);
 const CARPOOL_WAIT_CHOICES = [15, 30, 60, 240];
+// How long after touchdown the traveller expects to be at the kerb.
+const CARPOOL_BUFFER_CHOICES = [10, 20, 25, 35, 45];
+const CARPOOL_DEFAULT_BUFFER = 25;
 
 const CARPOOL_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -88,6 +98,10 @@ const smtpConfig = {
 };
 
 const mailer = smtpConfig.host && smtpConfig.auth ? nodemailer.createTransport(smtpConfig) : null;
+
+// Falls back to canned flights when FLIGHT_API_KEY is absent, so the feature is
+// always exercisable locally and never becomes a hard dependency.
+const flightProvider = getFlightProvider();
 
 let firestore = null;
 try {
@@ -281,6 +295,11 @@ function sanitizeFlightCode(value) {
         .slice(0, 10);
 }
 
+function normalizeBufferMinutes(value) {
+    const parsed = Number(value);
+    return CARPOOL_BUFFER_CHOICES.includes(parsed) ? parsed : CARPOOL_DEFAULT_BUFFER;
+}
+
 function normalizeWaitMinutes(value) {
     const parsed = Number(value);
     return CARPOOL_WAIT_CHOICES.includes(parsed) ? parsed : 30;
@@ -288,6 +307,25 @@ function normalizeWaitMinutes(value) {
 
 function displayName(row) {
     return row.name || `Student ${String(row.usn || '0000').slice(-4)}`;
+}
+
+function serializeFlight(flight) {
+    if (!flight) return null;
+    const arrival = flight.actualArrival ?? flight.estimatedArrival ?? flight.scheduledArrival;
+    return {
+        number: flight.number,
+        airline: flight.airline || null,
+        status: flight.status || 'unknown',
+        from: flight.origin?.name || flight.origin?.code || null,
+        terminal: flight.terminal || null,
+        // Often absent. The UI shows it when present and never depends on it.
+        belt: flight.belt || null,
+        scheduledArrival: Number.isFinite(flight.scheduledArrival)
+            ? new Date(flight.scheduledArrival).toISOString() : null,
+        arrival: Number.isFinite(arrival) ? new Date(arrival).toISOString() : null,
+        delayedBy: Number.isFinite(arrival) && Number.isFinite(flight.scheduledArrival)
+            ? Math.round((arrival - flight.scheduledArrival) / 60000) : 0
+    };
 }
 
 function serializeRequest(request, viewerUsn) {
@@ -299,9 +337,13 @@ function serializeRequest(request, viewerUsn) {
         direction: request.direction,
         time: new Date(Number(request.time)).toISOString(),
         flightCode: request.flightCode || '',
+        flight: serializeFlight(request.flight),
         isYou,
         // Only the owner needs their own tolerance, to draw their match window.
-        ...(isYou ? { waitMinutes: normalizeWaitMinutes(request.waitMinutes) } : {})
+        ...(isYou ? {
+            waitMinutes: normalizeWaitMinutes(request.waitMinutes),
+            bufferMinutes: request.bufferMinutes ?? null
+        } : {})
     };
 }
 
@@ -908,18 +950,75 @@ app.post('/api/carpool/logout', apiLimiter, requireCarpoolSession, async (req, r
     }
 });
 
+// Schedule lookup for the trip form. One call per posted trip; the live-status
+// polling that phase 2 adds reuses the same provider.
+app.get('/api/carpool/flights', apiLimiter, requireCarpoolSession, async (req, res) => {
+    const number = String(req.query.number || '').trim();
+    const date = String(req.query.date || '').trim();
+
+    if (!isValidFlightNumber(number)) {
+        return res.status(400).json({ error: 'Enter a flight number like 6E 2134' });
+    }
+    if (!isValidFlightDate(date)) {
+        return res.status(400).json({ error: 'Pick a valid date' });
+    }
+
+    try {
+        const flight = await flightProvider.lookup(number, date);
+        if (!flight) {
+            return res.status(404).json({ error: "We couldn't find that flight. Enter your time manually instead." });
+        }
+        res.json({ success: true, flight, provider: flightProvider.name });
+    } catch (err) {
+        console.error('Flight lookup failed:', err);
+        // Never let the flight API block a student: the form falls back to
+        // manual entry on a 503.
+        res.status(503).json({ error: 'Flight lookup is unavailable. Enter your time manually instead.' });
+    }
+});
+
 app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req, res) => {
     try {
-        const { direction, flightCode, time, waitMinutes } = req.body || {};
+        const { direction, flightCode, time, waitMinutes, flightNumber, flightDate, bufferMinutes } = req.body || {};
         if (!CARPOOL_DIRECTIONS.has(direction)) {
             return res.status(400).json({ error: 'Pick where you are heading' });
         }
 
-        const parsedTime = parseCarpoolTime(time);
-        if (!parsedTime) return res.status(400).json({ error: 'Invalid time' });
+        // A trip is timed one of two ways: from a flight the student picked, or
+        // from a time they typed. The flight path only makes sense inbound; a
+        // departure is about when you leave the hostel, not when you take off.
+        let flight = null;
+        let buffer = normalizeBufferMinutes(bufferMinutes);
+        let travelTime = null;
+
+        if (flightNumber && direction === 'hostel') {
+            if (!isValidFlightNumber(flightNumber)) {
+                return res.status(400).json({ error: 'Enter a flight number like 6E 2134' });
+            }
+            if (!isValidFlightDate(flightDate)) {
+                return res.status(400).json({ error: 'Pick a valid flight date' });
+            }
+            try {
+                flight = await flightProvider.lookup(flightNumber, flightDate);
+            } catch (err) {
+                console.error('Flight lookup failed during trip creation:', err);
+                return res.status(503).json({ error: 'Flight lookup is unavailable. Enter your time manually instead.' });
+            }
+            if (!flight) {
+                return res.status(404).json({ error: "We couldn't find that flight. Enter your time manually instead." });
+            }
+            travelTime = computeReadyTime(flight, buffer);
+            if (!Number.isFinite(travelTime)) {
+                return res.status(422).json({ error: "That flight has no arrival time yet. Enter your time manually instead." });
+            }
+        } else {
+            const parsedTime = parseCarpoolTime(time);
+            if (!parsedTime) return res.status(400).json({ error: 'Invalid time' });
+            travelTime = parsedTime.getTime();
+            buffer = null;
+        }
 
         const now = Date.now();
-        const travelTime = parsedTime.getTime();
         if (travelTime < now - CARPOOL_TRAVEL_GRACE_MS) {
             return res.status(400).json({ error: 'That time has already passed' });
         }
@@ -943,9 +1042,13 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
             photo: req.carpoolUser.photo,
             mobile: req.carpoolUser.mobile || '',
             direction,
-            flightCode: sanitizeFlightCode(flightCode),
+            // Kept for manual trips and as the display label; a tracked flight
+            // fills it from the provider so both paths render identically.
+            flightCode: flight ? flight.number : sanitizeFlightCode(flightCode),
             time: travelTime,
             waitMinutes: normalizeWaitMinutes(waitMinutes),
+            bufferMinutes: buffer,
+            flight: flight || null,
             createdAt: now
         };
         await carpoolSet(CARPOOL_COLLECTIONS.requests, id, request);

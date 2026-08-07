@@ -12,6 +12,8 @@ let state = {
     name: localStorage.getItem('cp_name') || null,
     photo: localStorage.getItem('cp_photo') || null,
     direction: null,
+    flight: null,
+    flightMode: false,
     myRequest: null,
     screen: 'auth',
     pollTimer: null,
@@ -36,6 +38,8 @@ const forms = {
 
 const inputs = {
     usn: document.getElementById('usn-input'),
+    flightNumber: document.getElementById('flight-number-input'),
+    flightDate: document.getElementById('flight-date-input'),
     otp: document.getElementById('otp-input'),
     time: document.getElementById('time-input'),
     flight: document.getElementById('flight-input'),
@@ -226,6 +230,11 @@ function showForm(mode = 'create') {
     document.getElementById('trip-submit-label').textContent = editing ? 'Save changes' : 'Post my trip';
     setStatus(document.getElementById('trip-status'), '', 'neutral');
     inputs.time.min = istInputNow();
+
+    // Inbound defaults to flight tracking; outbound has no flight to track.
+    setFlightMode(isHostel && !editing);
+    inputs.flightNumber.value = '';
+    inputs.flightDate.value = istInputNow().slice(0, 10);
 
     if (editing && state.myRequest) {
         inputs.time.value = isoToIstInput(state.myRequest.time);
@@ -428,14 +437,131 @@ document.getElementById('edit-request-btn').addEventListener('click', () => {
     showForm('edit');
 });
 
+// ---------------------------------------------------------------- Flight lookup
+const flightBlock = document.getElementById('flight-block');
+const manualBlock = document.getElementById('manual-block');
+const flightResult = document.getElementById('flight-result');
+const flightStatus = document.getElementById('flight-status');
+const backToFlightRow = document.getElementById('back-to-flight-row');
+
+// Inbound trips can be timed from the airline. Outbound is about when you leave
+// the hostel, so it stays a plain time.
+function setFlightMode(on) {
+    state.flightMode = on;
+    flightBlock.classList.toggle('hidden', !on);
+    manualBlock.classList.toggle('hidden', on);
+    backToFlightRow.classList.toggle('hidden', on || state.direction !== 'hostel');
+    // The optional free-text flight code is redundant once a real flight is
+    // attached, and two "flight number" boxes on one form is just confusing.
+    document.getElementById('manual-flight-field').classList.toggle('hidden', on);
+    // Drop any looked-up flight on either transition so a stale one can never
+    // be submitted after the student switched away from it.
+    clearFlight();
+}
+
+function clearFlight() {
+    state.flight = null;
+    flightResult.classList.add('hidden');
+    flightResult.innerHTML = '';
+    setStatus(flightStatus, '', 'neutral');
+}
+
+function renderFlight(flight) {
+    const lands = formatTime(flight.scheduledArrival ? new Date(flight.scheduledArrival).toISOString() : null);
+    const route = [flight.origin?.name || flight.origin?.code, flight.destination?.name || flight.destination?.code]
+        .filter(Boolean).join(' to ');
+
+    flightResult.innerHTML = `
+        <div class="fr-head">
+            <span class="fr-number">${escapeHtml(flight.number)}</span>
+            <span class="fr-airline">${escapeHtml(flight.airline || '')}</span>
+        </div>
+        <div class="fr-route">${escapeHtml(route)}</div>
+        <div class="fr-lands">Lands ${escapeHtml(lands)}${flight.terminal ? ` &middot; Terminal ${escapeHtml(flight.terminal)}` : ''}</div>
+
+        <div class="fr-buffer">
+            <div class="field" style="margin-bottom:0;">
+                <label for="buffer-input">I'll be out of the terminal</label>
+                <select id="buffer-input">
+                    <option value="10">10 min after landing (hand baggage only)</option>
+                    <option value="20">20 min after landing</option>
+                    <option value="25" selected>25 min after landing</option>
+                    <option value="35">35 min after landing (checked bag)</option>
+                    <option value="45">45 min after landing</option>
+                </select>
+            </div>
+            <p class="fr-ready" id="fr-ready"></p>
+        </div>
+    `;
+    flightResult.classList.remove('hidden');
+
+    const bufferInput = document.getElementById('buffer-input');
+    const paint = () => {
+        const ready = new Date(flight.scheduledArrival + Number(bufferInput.value) * 60000).toISOString();
+        document.getElementById('fr-ready').innerHTML =
+            `Matching you for <strong>${timeHtml(ready)}</strong>`;
+    };
+    bufferInput.addEventListener('change', paint);
+    paint();
+}
+
+document.getElementById('flight-find-btn').addEventListener('click', async () => {
+    const number = inputs.flightNumber.value.trim();
+    const date = inputs.flightDate.value;
+    if (!number || !date) {
+        setStatus(flightStatus, 'Enter your flight number and date', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('flight-find-btn');
+    btn.disabled = true;
+    setStatus(flightStatus, 'Looking it up...', 'neutral');
+    clearFlight();
+
+    try {
+        const data = await api(`/flights?number=${encodeURIComponent(number)}&date=${encodeURIComponent(date)}`);
+        state.flight = data.flight;
+        setStatus(flightStatus, '', 'neutral');
+        renderFlight(data.flight);
+    } catch (err) {
+        if (err.message === 'session-expired') return;
+        // Every failure path offers the manual route rather than dead-ending.
+        setStatus(flightStatus, err.message || 'Lookup failed', 'error');
+    } finally {
+        btn.disabled = false;
+    }
+});
+
+document.getElementById('use-manual-btn').addEventListener('click', () => setFlightMode(false));
+document.getElementById('use-flight-btn').addEventListener('click', () => setFlightMode(true));
+
 forms.trip.addEventListener('submit', async (e) => {
     e.preventDefault();
 
     const tripStatus = document.getElementById('trip-status');
-    const isoTime = istInputToIso(inputs.time.value);
-    if (!isoTime) {
-        setStatus(tripStatus, 'Pick a valid date and time', 'error');
-        return;
+    const usingFlight = state.flightMode && state.flight;
+
+    let payload;
+    if (usingFlight) {
+        payload = {
+            direction: state.direction,
+            flightNumber: state.flight.number,
+            flightDate: state.flight.date,
+            bufferMinutes: Number(document.getElementById('buffer-input')?.value || 25),
+            waitMinutes: inputs.wait.value
+        };
+    } else {
+        const isoTime = istInputToIso(inputs.time.value);
+        if (!isoTime) {
+            setStatus(tripStatus, 'Pick a valid date and time', 'error');
+            return;
+        }
+        payload = {
+            direction: state.direction,
+            time: isoTime,
+            flightCode: inputs.flight.value,
+            waitMinutes: inputs.wait.value
+        };
     }
 
     const btn = forms.trip.querySelector('button[type="submit"]');
@@ -448,12 +574,7 @@ forms.trip.addEventListener('submit', async (e) => {
     try {
         const data = await api('/requests', {
             method: 'POST',
-            body: JSON.stringify({
-                direction: state.direction,
-                time: isoTime,
-                flightCode: inputs.flight.value,
-                waitMinutes: inputs.wait.value
-            })
+            body: JSON.stringify(payload)
         });
 
         state.myRequest = data.request || null;

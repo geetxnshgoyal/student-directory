@@ -1665,3 +1665,91 @@ input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
         flex-wrap: wrap;
     }
 }
+
+/* ============================ Flight lookup ============================ */
+.flight-result {
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 18px;
+    margin-top: 4px;
+    background: var(--surface-2);
+}
+
+.fr-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.fr-number {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.fr-airline {
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.fr-route {
+    font-size: 14px;
+    color: var(--text-mid);
+    margin-top: 6px;
+}
+
+.fr-lands {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text);
+    margin-top: 10px;
+}
+
+.fr-buffer {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--line);
+}
+
+.fr-ready {
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--text-mid);
+}
+
+.fr-ready strong {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.flight-switch {
+    margin-top: 12px;
+    text-align: center;
+}
+
+/* Status chip on the live board */
+.board-flight {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.board-flight.is-landed {
+    color: var(--arrive);
+    border-color: var(--arrive);
+}
+
+.board-flight.is-delayed {
+    color: var(--depart);
+    border-color: var(--depart);
+}
