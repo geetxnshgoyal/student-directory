@@ -20,6 +20,10 @@
     {
       "path": "/api/cron/birthday",
       "schedule": "30 18 * * *"
+    },
+    {
+      "path": "/api/cron/flight-schedule",
+      "schedule": "45 19 * * *"
     }
   ]
 }

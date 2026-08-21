@@ -1665,3 +1665,216 @@ input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
         flex-wrap: wrap;
     }
 }
+
+/* ============================ Flight lookup ============================ */
+.flight-result {
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 18px;
+    margin-top: 4px;
+    background: var(--surface-2);
+}
+
+.fr-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.fr-number {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.fr-airline {
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.fr-route {
+    font-size: 14px;
+    color: var(--text-mid);
+    margin-top: 6px;
+}
+
+.fr-lands {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text);
+    margin-top: 10px;
+}
+
+.fr-buffer {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--line);
+}
+
+.fr-ready {
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--text-mid);
+}
+
+.fr-ready strong {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.flight-switch {
+    margin-top: 12px;
+    text-align: center;
+}
+
+/* Status chip on the live board */
+.board-flight {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.board-flight.is-landed {
+    color: var(--arrive);
+    border-color: var(--arrive);
+}
+
+.board-flight.is-delayed {
+    color: var(--depart);
+    border-color: var(--depart);
+}
+
+/* ============================ Route browse ============================ */
+.city-results {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.city-flight {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    text-align: left;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    color: var(--text);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: border-color 160ms var(--ease);
+}
+
+.city-flight:hover {
+    border-color: var(--accent-edge);
+}
+
+.cf-left {
+    min-width: 0;
+}
+
+.cf-number {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.cf-airline {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 2px;
+}
+
+.cf-time {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+    font-weight: 600;
+    flex: 0 0 auto;
+}
+
+.field-inline {
+    display: flex;
+    gap: 8px;
+}
+
+.field-inline input {
+    flex: 1;
+    min-width: 0;
+}
+
+.field-inline .btn {
+    flex: 0 0 auto;
+}
+
+.switch-sep {
+    color: var(--text-dim);
+    margin: 0 4px;
+}
+
+/* ============================ Phone fixes ============================ */
+@media (max-width: 560px) {
+    /* "NST Carpool" and "Sign out" were both wrapping to two lines. */
+    .brand-name {
+        white-space: nowrap;
+        font-size: 17px;
+    }
+
+    .topbar-inner {
+        gap: 10px;
+    }
+
+    .topbar-right {
+        gap: 8px;
+    }
+
+    .btn-quiet {
+        white-space: nowrap;
+        padding: 9px 12px;
+    }
+
+    /* Two links plus a separator do not fit on one line; stack them and drop
+       the dot rather than leaving it orphaned at the end of the first row. */
+    .flight-switch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        margin-top: 18px;
+        margin-bottom: 22px;
+    }
+
+    .switch-sep {
+        display: none;
+    }
+
+    /* The flight list needs air before the next control. */
+    .city-results:not(:empty) {
+        margin-bottom: 4px;
+    }
+
+    /* A 115-option native picker is fine on a phone, but give it room. */
+    #city-input,
+    .field select {
+        font-size: 16px; /* stops iOS zooming the page on focus */
+    }
+
+    .field input {
+        font-size: 16px;
+    }
+}

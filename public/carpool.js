@@ -12,6 +12,8 @@ let state = {
     name: localStorage.getItem('cp_name') || null,
     photo: localStorage.getItem('cp_photo') || null,
     direction: null,
+    flight: null,
+    flightMode: false,
     myRequest: null,
     screen: 'auth',
     pollTimer: null,
@@ -36,6 +38,8 @@ const forms = {
 
 const inputs = {
     usn: document.getElementById('usn-input'),
+    flightNumber: document.getElementById('flight-number-input'),
+    flightDate: document.getElementById('flight-date-input'),
     otp: document.getElementById('otp-input'),
     time: document.getElementById('time-input'),
     flight: document.getElementById('flight-input'),
@@ -226,6 +230,15 @@ function showForm(mode = 'create') {
     document.getElementById('trip-submit-label').textContent = editing ? 'Save changes' : 'Post my trip';
     setStatus(document.getElementById('trip-status'), '', 'neutral');
     inputs.time.min = istInputNow();
+
+    document.getElementById('city-label').textContent = isHostel ? 'Flying from' : 'Flying to';
+    document.getElementById('flight-date-label').textContent = isHostel ? 'Date of arrival' : 'Date of departure';
+    inputs.flightNumber.value = '';
+    inputs.flightDate.value = istInputNow().slice(0, 10);
+    cityInput.value = '';
+    document.getElementById('city-results').innerHTML = '';
+    // Both directions are now timed from a flight, so default to it either way.
+    setFlightMode(!editing);
 
     if (editing && state.myRequest) {
         inputs.time.value = isoToIstInput(state.myRequest.time);
@@ -428,14 +441,241 @@ document.getElementById('edit-request-btn').addEventListener('click', () => {
     showForm('edit');
 });
 
+// ---------------------------------------------------------------- Flight lookup
+const flightBlock = document.getElementById('flight-block');
+const manualBlock = document.getElementById('manual-block');
+const numberBlock = document.getElementById('number-block');
+const flightResult = document.getElementById('flight-result');
+const flightStatus = document.getElementById('flight-status');
+const backToFlightRow = document.getElementById('back-to-flight-row');
+const cityResults = document.getElementById('city-results');
+const cityInput = document.getElementById('city-input');
+let citiesLoaded = false;
+
+function setFlightMode(on) {
+    state.flightMode = on;
+    flightBlock.classList.toggle('hidden', !on);
+    manualBlock.classList.toggle('hidden', on);
+    backToFlightRow.classList.toggle('hidden', on);
+    document.getElementById('manual-flight-field').classList.toggle('hidden', on);
+    numberBlock.classList.add('hidden');
+    clearFlight();
+    if (on) loadCities();
+}
+
+function clearFlight() {
+    state.flight = null;
+    flightResult.classList.add('hidden');
+    flightResult.innerHTML = '';
+    setStatus(flightStatus, '', 'neutral');
+}
+
+async function loadCities() {
+    if (citiesLoaded) return;
+    try {
+        const data = await api('/flights/cities');
+        cityInput.innerHTML = '<option value="">Choose a city</option>'
+            + (data.cities || []).map(c =>
+                `<option value="${escapeHtml(c.code)}">${escapeHtml(c.city)} (${escapeHtml(c.code)})</option>`
+            ).join('');
+        citiesLoaded = true;
+    } catch (err) {
+        if (err.message !== 'session-expired') setStatus(flightStatus, 'Could not load cities', 'error');
+    }
+}
+
+// Inbound picks an arrival time and a baggage buffer; outbound works back from
+// take-off through the airport cushion and the drive.
+function renderFlight(flight) {
+    const inbound = state.direction === 'hostel';
+    const base = inbound ? flight.scheduledArrival : flight.scheduledDeparture;
+    const when = formatTime(base ? new Date(base).toISOString() : null);
+    const route = inbound
+        ? `${flight.origin?.name || flight.origin?.code} to Bengaluru`
+        : `Bengaluru to ${flight.destination?.name || flight.destination?.code}`;
+
+    const controls = inbound
+        ? `<div class="field" style="margin-bottom:0;">
+               <label for="buffer-input">I'll be out of the terminal</label>
+               <select id="buffer-input">
+                   <option value="10">10 min after landing (hand baggage)</option>
+                   <option value="20">20 min after landing</option>
+                   <option value="25" selected>25 min after landing</option>
+                   <option value="35">35 min after landing (checked bag)</option>
+                   <option value="45">45 min after landing</option>
+               </select>
+           </div>`
+        : `<div class="field">
+               <label for="reach-input">Be at the airport</label>
+               <select id="reach-input">
+                   <option value="90">1 h 30 m before departure</option>
+                   <option value="120" selected>2 h before departure</option>
+                   <option value="150">2 h 30 m before departure</option>
+                   <option value="180">3 h before departure (lounge)</option>
+               </select>
+           </div>
+           <div class="field" style="margin-bottom:0;">
+               <label for="travel-input">Drive to the airport</label>
+               <select id="travel-input">
+                   <option value="75">1 h 15 m</option>
+                   <option value="90" selected>1 h 30 m</option>
+                   <option value="105">1 h 45 m (traffic)</option>
+                   <option value="120">2 h</option>
+               </select>
+               <p class="field-hint" id="traffic-hint"></p>
+           </div>`;
+
+    flightResult.innerHTML = `
+        <div class="fr-head">
+            <span class="fr-number">${escapeHtml(flight.number)}</span>
+            <span class="fr-airline">${escapeHtml(flight.airline || '')}</span>
+        </div>
+        <div class="fr-route">${escapeHtml(route)}</div>
+        <div class="fr-lands">${inbound ? 'Lands' : 'Departs'} ${escapeHtml(when)}${flight.terminal ? ` &middot; Terminal ${escapeHtml(String(flight.terminal).replace(/^T/i, ''))}` : ''}</div>
+        <div class="fr-buffer">${controls}<p class="fr-ready" id="fr-ready"></p></div>
+    `;
+    flightResult.classList.remove('hidden');
+
+    const paint = () => {
+        let moment;
+        if (inbound) {
+            moment = base + Number(document.getElementById('buffer-input').value) * 60000;
+        } else {
+            const lead = Number(document.getElementById('reach-input').value)
+                + Number(document.getElementById('travel-input').value);
+            moment = base - lead * 60000;
+        }
+        document.getElementById('fr-ready').innerHTML = inbound
+            ? `Matching you for <strong>${timeHtml(new Date(moment).toISOString())}</strong>`
+            : `Leave the hostel at <strong>${timeHtml(new Date(moment).toISOString())}</strong>`;
+        if (!inbound) suggestTraffic(moment);
+    };
+
+    flightResult.querySelectorAll('select').forEach(sel => sel.addEventListener('change', paint));
+    paint();
+}
+
+// Advisory only: a flat estimate is wrong twice a day on this road, but a
+// failed lookup must never stop the form.
+async function suggestTraffic(leaveAt) {
+    const hint = document.getElementById('traffic-hint');
+    if (!hint) return;
+    try {
+        const data = await api(`/travel-estimate?at=${Math.round(leaveAt)}`);
+        hint.textContent = data.source === 'google-routes'
+            ? `Maps says about ${data.minutes} min at that hour`
+                + (data.trafficDelayMinutes > 5 ? ` (${data.trafficDelayMinutes} min of traffic)` : '')
+            : '';
+    } catch {
+        hint.textContent = '';
+    }
+}
+
+async function runLookup(number) {
+    setStatus(flightStatus, 'Looking it up...', 'neutral');
+    clearFlight();
+    try {
+        const data = await api(`/flights?number=${encodeURIComponent(number)}`
+            + `&date=${encodeURIComponent(inputs.flightDate.value)}`
+            + `&direction=${state.direction === 'hostel' ? 'Arrival' : 'Departure'}`);
+        state.flight = data.flight;
+        setStatus(flightStatus, '', 'neutral');
+        renderFlight(data.flight);
+    } catch (err) {
+        if (err.message === 'session-expired') return;
+        setStatus(flightStatus, err.message || 'Lookup failed', 'error');
+    }
+}
+
+cityInput.addEventListener('change', async () => {
+    const city = cityInput.value;
+    cityResults.innerHTML = '';
+    clearFlight();
+    if (!city) return;
+
+    const inbound = state.direction === 'hostel';
+    setStatus(flightStatus, 'Finding flights...', 'neutral');
+    try {
+        const path = inbound
+            ? `/flights/search?from=${encodeURIComponent(city)}`
+            : `/flights/departures?to=${encodeURIComponent(city)}`;
+        const data = await api(`${path}&date=${encodeURIComponent(inputs.flightDate.value)}`);
+        setStatus(flightStatus, '', 'neutral');
+        const flights = data.flights || [];
+
+        if (!flights.length) {
+            cityResults.innerHTML = '<p class="field-hint">No flights found for that city and date. '
+                + 'Try the flight number, or set your time manually.</p>';
+            return;
+        }
+
+        cityResults.innerHTML = flights.map(f => {
+            const at = inbound ? f.scheduledArrival : f.scheduledDeparture;
+            return `<button type="button" class="city-flight" data-number="${escapeHtml(f.number)}">
+                <span class="cf-left">
+                    <span class="cf-number">${escapeHtml(f.number)}</span>
+                    <span class="cf-airline">${escapeHtml(f.airline || '')}</span>
+                </span>
+                <span class="cf-time">${timeHtml(new Date(at).toISOString())}</span>
+            </button>`;
+        }).join('');
+
+        cityResults.querySelectorAll('.city-flight').forEach(btn => {
+            btn.addEventListener('click', () => runLookup(btn.dataset.number));
+        });
+    } catch (err) {
+        if (err.message !== 'session-expired') setStatus(flightStatus, err.message || 'Search failed', 'error');
+    }
+});
+
+document.getElementById('flight-find-btn').addEventListener('click', () => {
+    const number = inputs.flightNumber.value.trim();
+    if (!number) {
+        setStatus(flightStatus, 'Enter your flight number', 'error');
+        return;
+    }
+    runLookup(number);
+});
+
+document.getElementById('use-number-btn').addEventListener('click', () => {
+    numberBlock.classList.toggle('hidden');
+    if (!numberBlock.classList.contains('hidden')) inputs.flightNumber.focus();
+});
+document.getElementById('use-manual-btn').addEventListener('click', () => setFlightMode(false));
+document.getElementById('use-flight-btn').addEventListener('click', () => setFlightMode(true));
+
 forms.trip.addEventListener('submit', async (e) => {
     e.preventDefault();
 
     const tripStatus = document.getElementById('trip-status');
-    const isoTime = istInputToIso(inputs.time.value);
-    if (!isoTime) {
-        setStatus(tripStatus, 'Pick a valid date and time', 'error');
-        return;
+    const usingFlight = state.flightMode && state.flight;
+
+    let payload;
+    if (usingFlight) {
+        payload = {
+            direction: state.direction,
+            flightNumber: state.flight.number,
+            flightDate: state.flight.date,
+            waitMinutes: inputs.wait.value,
+            ...(state.direction === 'hostel'
+                ? { bufferMinutes: Number(document.getElementById('buffer-input')?.value || 25) }
+                : {
+                    reachMinutes: Number(document.getElementById('reach-input')?.value || 120),
+                    travelMinutes: Number(document.getElementById('travel-input')?.value || 90)
+                })
+        };
+    } else {
+        const isoTime = istInputToIso(inputs.time.value);
+        if (!isoTime) {
+            setStatus(tripStatus, 'Pick a valid date and time', 'error');
+            return;
+        }
+        payload = {
+            direction: state.direction,
+            time: isoTime,
+            flightCode: inputs.flight.value,
+            waitMinutes: inputs.wait.value
+        };
     }
 
     const btn = forms.trip.querySelector('button[type="submit"]');
@@ -448,12 +688,7 @@ forms.trip.addEventListener('submit', async (e) => {
     try {
         const data = await api('/requests', {
             method: 'POST',
-            body: JSON.stringify({
-                direction: state.direction,
-                time: isoTime,
-                flightCode: inputs.flight.value,
-                waitMinutes: inputs.wait.value
-            })
+            body: JSON.stringify(payload)
         });
 
         state.myRequest = data.request || null;

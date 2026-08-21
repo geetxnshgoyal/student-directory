@@ -234,14 +234,62 @@
                 </div>
 
                 <form id="create-request-form" novalidate>
-                    <div class="field">
-                        <label for="time-input" id="time-label">Landing time</label>
-                        <input type="datetime-local" id="time-input" required>
-                        <p class="field-hint">All times are India Standard Time.</p>
+                    <!-- City first: most students know where they're flying from
+                         long before they can recite a flight number. -->
+                    <div id="flight-block" class="hidden">
+                        <div class="field-row">
+                            <div class="field">
+                                <label for="city-input" id="city-label">Flying from</label>
+                                <select id="city-input">
+                                    <option value="">Choose a city</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label for="flight-date-input" id="flight-date-label">Date of arrival</label>
+                                <input type="date" id="flight-date-input">
+                            </div>
+                        </div>
+
+                        <div id="city-results" class="city-results"></div>
+
+                        <!-- Secondary: straight to the number if they know it -->
+                        <div id="number-block" class="hidden">
+                            <div class="field">
+                                <label for="flight-number-input">Flight number</label>
+                                <div class="field-inline">
+                                    <input type="text" id="flight-number-input" class="mono" placeholder="6E 2134"
+                                        maxlength="8" autocomplete="off" autocapitalize="characters">
+                                    <button type="button" id="flight-find-btn" class="btn btn-quiet">Find</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p class="status-msg" id="flight-status" role="status" aria-live="polite"></p>
+                        <div id="flight-result" class="flight-result hidden"></div>
+
+                        <p class="flight-switch">
+                            <button type="button" id="use-number-btn" class="btn-link">Know your flight number?</button>
+                            <span class="switch-sep" aria-hidden="true">&middot;</span>
+                            <button type="button" id="use-manual-btn" class="btn-link">Enter time manually</button>
+                        </p>
+                    </div>
+
+                    <!-- Always available: the flight API must never be a hard dependency -->
+                    <div id="manual-block">
+                        <div class="field">
+                            <label for="time-input" id="time-label">Landing time</label>
+                            <input type="datetime-local" id="time-input">
+                            <p class="field-hint">All times are India Standard Time.</p>
+                        </div>
+                        <p class="flight-switch hidden" id="back-to-flight-row">
+                            <button type="button" id="use-flight-btn" class="btn-link">
+                                Track my flight instead
+                            </button>
+                        </p>
                     </div>
 
                     <div class="field-row">
-                        <div class="field">
+                        <div class="field" id="manual-flight-field">
                             <label for="flight-input">Flight number <span class="optional">optional</span></label>
                             <input type="text" id="flight-input" placeholder="6E 505" maxlength="10"
                                 autocomplete="off" class="mono">

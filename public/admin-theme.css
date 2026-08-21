@@ -634,3 +634,225 @@ body {
     border-color: var(--error);
     color: var(--error);
 }
+
+/* ===== First year · Batch of 2030 =====
+   The second directory in the admin dashboard, fed by the volunteer intake
+   portal. Shares the card and chip language of the main directory so switching
+   between the two does not feel like a different product. */
+
+.view-switch {
+    display: flex;
+    gap: 6px;
+    padding: 5px;
+    margin: 0 0 26px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+}
+
+.view-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 16px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: var(--font-body);
+    font-size: 0.92rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease;
+}
+
+.view-btn:hover {
+    color: var(--text-primary);
+}
+
+.view-btn.active {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+}
+
+.fy-summary {
+    margin-bottom: 24px;
+}
+
+.fy-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.fy-stat {
+    flex: 1;
+    min-width: 120px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 16px 18px;
+    border-radius: 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+}
+
+.fy-stat-value {
+    font-family: var(--font-display);
+    font-size: 1.7rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.1;
+}
+
+.fy-stat-label {
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.fy-contributors {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.fy-contrib-label {
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.fy-chip {
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.fy-chip b {
+    color: var(--text-primary);
+    margin-left: 3px;
+}
+
+.fy-note {
+    margin: 0;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.fy-added-by {
+    margin-top: 6px;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+/* Shared with the intake portal's own entry list. */
+.entry-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    border-radius: 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.entry-card:hover {
+    border-color: var(--border-focus);
+    transform: translateY(-2px);
+}
+
+.entry-photo {
+    width: 54px;
+    height: 54px;
+    border-radius: 14px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.entry-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.entry-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.entry-usn {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.entry-flags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 7px;
+}
+
+.flag {
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    background: var(--warning-light);
+    color: var(--warning);
+}
+
+.flag.ok {
+    background: var(--success-light);
+    color: var(--success);
+}
+
+.empty-note {
+    text-align: center;
+    width: 100%;
+    color: var(--text-secondary);
+    padding: 30px 10px;
+}
+
+.pc-danger {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border-color);
+}
+
+.action-btn.danger {
+    align-self: flex-start;
+    background: var(--error-light);
+    color: var(--error);
+    border-color: transparent;
+}
+
+.action-btn.danger:hover {
+    filter: brightness(0.96);
+}
+
+@media (max-width: 560px) {
+    .view-switch {
+        flex-direction: column;
+    }
+}
