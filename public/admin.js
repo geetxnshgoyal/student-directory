@@ -749,3 +749,273 @@ document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
         }
     });
 });
+
+// ===== First year · Batch of 2030 =====
+//
+// A second, separate directory fed by the volunteer intake portal at /intake.
+// It reads a different Firestore collection, so an incomplete first-year record
+// can never leak into the carpool, the birthday mail or the stats above.
+
+let firstYearStudents = [];
+let firstYearLoaded = false;
+
+// Names here are typed by volunteers rather than curated, so nothing reaches
+// innerHTML without being escaped first.
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+}
+
+const FIELD_LABELS = {
+    gender: 'gender',
+    birthday: 'DOB',
+    blood_group: 'blood group',
+    mobile_number: 'mobile',
+    photo: 'photo'
+};
+
+function switchView(view) {
+    document.querySelectorAll('[data-view-btn]').forEach(btn => {
+        const active = btn.dataset.viewBtn === view;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', String(active));
+    });
+
+    document.querySelectorAll('[data-view]').forEach(node => {
+        const mine = node.dataset.view === view;
+        // The birthday and blood panels are toggled by their own buttons, so
+        // showing the directory again must not force them back open.
+        if (!mine) {
+            node.classList.add('hidden');
+        } else if (node.id !== 'birthdays-section' && node.id !== 'blood-group-section') {
+            node.classList.remove('hidden');
+        }
+    });
+
+    if (view === 'first-year' && !firstYearLoaded) loadFirstYear();
+}
+
+document.querySelectorAll('[data-view-btn]').forEach(btn => {
+    btn.addEventListener('click', () => switchView(btn.dataset.viewBtn));
+});
+
+async function loadFirstYear() {
+    const token = localStorage.getItem('adminToken');
+    if (!token) return logout();
+
+    const grid = document.getElementById('fy-grid');
+    grid.innerHTML = '<p class="empty-note">Loading…</p>';
+
+    try {
+        const res = await fetch('/api/admin/first-year', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.status === 401 || res.status === 403) return logout();
+
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load');
+
+        firstYearStudents = data.students || [];
+        firstYearLoaded = true;
+        renderFirstYearSummary();
+        renderFirstYear();
+    } catch (e) {
+        console.error('First year load failed:', e);
+        grid.innerHTML = `<p class="empty-note">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function renderFirstYearSummary() {
+    const total = firstYearStudents.length;
+    const complete = firstYearStudents.filter(s => (s.missing || []).length === 0).length;
+
+    const byVolunteer = {};
+    firstYearStudents.forEach(s => {
+        const who = s.added_by_name || s.added_by || 'unknown';
+        byVolunteer[who] = (byVolunteer[who] || 0) + 1;
+    });
+
+    const contributors = Object.entries(byVolunteer)
+        .sort((a, b) => b[1] - a[1])
+        .map(([who, n]) => `<span class="fy-chip">${escapeHtml(who)} <b>${n}</b></span>`)
+        .join('');
+
+    const tabCount = document.getElementById('fy-tab-count');
+    tabCount.textContent = total;
+    tabCount.classList.toggle('hidden', total === 0);
+
+    document.getElementById('fy-summary').innerHTML = `
+        <div class="fy-stats">
+            <div class="fy-stat"><span class="fy-stat-value">${total}</span><span class="fy-stat-label">collected</span></div>
+            <div class="fy-stat"><span class="fy-stat-value">${complete}</span><span class="fy-stat-label">complete</span></div>
+            <div class="fy-stat"><span class="fy-stat-value">${total - complete}</span><span class="fy-stat-label">missing details</span></div>
+        </div>
+        ${contributors ? `<div class="fy-contributors"><span class="fy-contrib-label">Added by</span>${contributors}</div>` : ''}
+        <p class="fy-note">Batch is locked until the official split is published. Records live in a separate
+            collection and do not appear in the directory, carpool or birthday mail.</p>`;
+}
+
+function renderFirstYear() {
+    const query = (document.getElementById('fy-search').value || '').toLowerCase();
+    const filter = document.getElementById('fy-filter').value;
+    const grid = document.getElementById('fy-grid');
+
+    const rows = firstYearStudents.filter(s => {
+        const missing = (s.missing || []).length > 0;
+        if (filter === 'incomplete' && !missing) return false;
+        if (filter === 'complete' && missing) return false;
+
+        if (!query) return true;
+        return [s.name, s.usn, s.added_by_name, s.added_by]
+            .some(v => String(v || '').toLowerCase().includes(query));
+    });
+
+    document.getElementById('fy-count').textContent = `${rows.length} shown`;
+
+    if (rows.length === 0) {
+        grid.innerHTML = firstYearStudents.length === 0
+            ? '<p class="empty-note">No first-year records yet. Volunteers add them at <b>/intake</b>.</p>'
+            : '<p class="empty-note">Nothing matches that search.</p>';
+        return;
+    }
+
+    grid.innerHTML = rows.map(s => {
+        const missing = s.missing || [];
+        const flags = missing.length
+            ? missing.map(f => `<span class="flag">no ${escapeHtml(FIELD_LABELS[f] || f)}</span>`).join('')
+            : '<span class="flag ok">complete</span>';
+
+        const avatar = s.photo_thumb
+            ? `<img class="entry-photo" src="${escapeHtml(s.photo_thumb)}" alt="">`
+            : `<div class="entry-photo avatar-initial">${escapeHtml((s.name || '?').charAt(0).toUpperCase())}</div>`;
+
+        return `
+            <div class="entry-card fy-card" data-fy-usn="${escapeHtml(s.usn || '')}" style="cursor:pointer;">
+                ${avatar}
+                <div class="entry-body">
+                    <p class="entry-name">${escapeHtml(s.name || 'Unknown')}</p>
+                    <span class="entry-usn">${escapeHtml(s.usn || '')}</span>
+                    <div class="entry-flags">${flags}</div>
+                    <div class="fy-added-by">added by ${escapeHtml(s.added_by_name || s.added_by || 'unknown')}</div>
+                </div>
+            </div>`;
+    }).join('');
+}
+
+document.getElementById('fy-search').addEventListener('input', renderFirstYear);
+document.getElementById('fy-filter').addEventListener('change', renderFirstYear);
+document.getElementById('fy-refresh').addEventListener('click', loadFirstYear);
+
+// The list carries thumbnails only, so the full-quality photo is fetched when a
+// card is actually opened.
+document.getElementById('fy-grid').addEventListener('click', async (e) => {
+    const card = e.target.closest('[data-fy-usn]');
+    if (!card) return;
+
+    const usn = card.dataset.fyUsn;
+    const token = localStorage.getItem('adminToken');
+
+    try {
+        const res = await fetch(`/api/admin/first-year/${encodeURIComponent(usn)}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.status === 401 || res.status === 403) return logout();
+
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load');
+
+        openFirstYearModal(data.student);
+    } catch (err) {
+        console.error('First year fetch failed:', err);
+        showMessage(err.message, true);
+    }
+});
+
+function openFirstYearModal(s) {
+    const portrait = s.photo
+        ? `<img src="${escapeHtml(s.photo)}" alt="" class="pc-portrait">`
+        : `<div class="pc-portrait pc-portrait-fallback">${escapeHtml((s.name || '?').charAt(0).toUpperCase())}</div>`;
+
+    const link = (url, label) => url
+        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="pc-link">${label}</a>`
+        : '';
+
+    const row = (label, value, cls = '') => `
+        <div class="pc-row">
+            <span class="pc-label">${label}</span>
+            <span class="pc-value ${cls}">${escapeHtml(value) || 'Not set'}</span>
+        </div>`;
+
+    modalBody.innerHTML = `
+        <div class="profile-card">
+            <div class="pc-hero">
+                ${portrait}
+                <div class="pc-ident">
+                    <h2 class="pc-name">${escapeHtml(s.name || 'Unknown')}</h2>
+                    <div class="pc-usn">${escapeHtml(s.usn || '')}</div>
+                    <div class="pc-chips">
+                        <span class="pc-chip">First year · 2030</span>
+                        ${s.blood_group ? `<span class="pc-chip pc-chip-blood">${escapeHtml(s.blood_group)}</span>` : ''}
+                        ${s.gender ? `<span class="pc-chip">${escapeHtml(s.gender)}</span>` : ''}
+                    </div>
+                    <div class="pc-actions">
+                        ${link(s.linkedin, 'LinkedIn')}
+                        ${link(s.github, 'GitHub')}
+                    </div>
+                </div>
+            </div>
+
+            <div class="pc-details">
+                ${row('Birthday', s.birthday)}
+                ${row('Mobile', s.mobile_number, 'pc-mono')}
+                ${row('Email', s.email, 'pc-mono pc-wrap')}
+                ${row('College email', s.institutional_email, 'pc-mono pc-wrap')}
+                ${row('Batch', 'Released later')}
+                ${row('Added by', s.added_by_name || s.added_by)}
+                ${row('Added on', String(s.createdAt || '').slice(0, 10))}
+            </div>
+
+            <div class="pc-danger">
+                <button type="button" class="action-btn danger" data-fy-delete="${escapeHtml(s.usn || '')}">
+                    Delete this record
+                </button>
+                <span class="field-hint">Volunteers cannot delete. This is the only way a record is removed.</span>
+            </div>
+        </div>`;
+
+    studentModal.classList.remove('hidden');
+}
+
+modalBody.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-fy-delete]');
+    if (!btn) return;
+
+    const usn = btn.dataset.fyDelete;
+    if (!confirm(`Delete the first-year record ${usn}? This cannot be undone.`)) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+
+    try {
+        const res = await fetch(`/api/admin/first-year/${encodeURIComponent(usn)}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` }
+        });
+        if (res.status === 401 || res.status === 403) return logout();
+
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Delete failed');
+
+        studentModal.classList.add('hidden');
+        firstYearStudents = firstYearStudents.filter(s => s.usn !== usn);
+        renderFirstYearSummary();
+        renderFirstYear();
+        showMessage(`Deleted ${usn}`);
+    } catch (err) {
+        console.error('First year delete failed:', err);
+        btn.disabled = false;
+        btn.textContent = 'Delete this record';
+        showMessage(err.message, true);
+    }
+});

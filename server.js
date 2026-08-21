@@ -48,9 +48,27 @@ const {
     normaliseFlightNumber,
     isValidFlightNumber,
     isValidFlightDate,
+    isDomesticFlight,
     ORIGIN_CITIES
 } = require('./scripts/flight-provider');
+const {
+    SCHEDULE_COLLECTION,
+    recordBoard,
+    scheduleLookup,
+    pruneSchedule
+} = require('./scripts/flight-schedule');
 const { getTravelEstimator } = require('./scripts/travel-time');
+const bcrypt = require('bcryptjs');
+const {
+    FIRST_YEAR_COLLECTION,
+    INTAKE_USERS_COLLECTION,
+    INTAKE_AUDIT_COLLECTION,
+    FIRST_YEAR_BATCH,
+    FIRST_YEAR_YEAR,
+    validateStudentPayload,
+    normalizeUsn: normalizeIntakeUsn,
+    missingFields
+} = require('./scripts/first-year-intake');
 
 const app = express();
 // Vercel terminates TLS in front of us. Without this every request looks like it
@@ -90,7 +108,10 @@ const CARPOOL_COLLECTIONS = {
     otps: 'carpool_otps',
     sessions: 'carpool_sessions',
     requests: 'carpool_requests',
-    notified: 'carpool_notified'
+    notified: 'carpool_notified',
+    // Not carpool data as such, but it rides the same store helpers and the
+    // same in-memory fallback, so it lives with them.
+    flightSchedule: SCHEDULE_COLLECTION
 };
 
 // Carpool state lives in Firestore so it survives across serverless invocations.
@@ -109,8 +130,8 @@ const smtpConfig = {
 
 const mailer = smtpConfig.host && smtpConfig.auth ? nodemailer.createTransport(smtpConfig) : null;
 
-// Falls back to canned flights when FLIGHT_API_KEY is absent, so the feature is
-// always exercisable locally and never becomes a hard dependency.
+// Skyscanner by default, which needs no key but does need the network. Set
+// FLIGHT_PROVIDER=stub to work offline against canned flights.
 const flightProvider = getFlightProvider();
 // Live traffic when GOOGLE_MAPS_API_KEY and HOSTEL_LATLNG are set, a flat
 // estimate otherwise. Advisory either way: the student can always override it.
@@ -200,6 +221,35 @@ async function carpoolList(collection) {
         return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     }
     return [...carpoolMemory.get(collection).entries()].map(([id, value]) => ({ id, ...value }));
+}
+
+// flight-schedule.js stays storage agnostic so it can be tested against a plain
+// Map; this is the adapter onto whatever the carpool helpers are backed by.
+const flightScheduleStore = {
+    get: id => carpoolGet(CARPOOL_COLLECTIONS.flightSchedule, id),
+    set: (id, data) => carpoolSet(CARPOOL_COLLECTIONS.flightSchedule, id, data),
+    delete: id => carpoolDelete(CARPOOL_COLLECTIONS.flightSchedule, id),
+    list: () => carpoolList(CARPOOL_COLLECTIONS.flightSchedule)
+};
+
+/**
+ * The live board first, the learned timetable second.
+ *
+ * Skyscanner only carries today and tomorrow. Beyond that the board simply has
+ * no row, so rather than telling a student their real flight does not exist we
+ * fall back to the schedule the nightly snapshot has been building. What comes
+ * back is flagged estimated:true so the UI can say so out loud.
+ */
+async function lookupFlight(number, date, direction = 'Arrival') {
+    const live = await flightProvider.lookup(number, date, direction);
+    if (live) return live;
+    try {
+        return await scheduleLookup(flightScheduleStore, number, date, direction);
+    } catch (err) {
+        // A schedule miss must never turn a working lookup into a 503.
+        console.error('Schedule fallback failed:', err);
+        return null;
+    }
 }
 
 // A journey stays on the board until shortly after its travel time, so a flight
@@ -688,6 +738,11 @@ app.use(helmet({
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
 }));
 
+// A capture at full quality is up to ~800KB of base64, well past the 100kb
+// default. Only the intake write routes get the bigger ceiling; every other
+// endpoint keeps the tighter default, which is the useful part of the limit.
+app.use('/api/intake/students', express.json({ limit: '1500kb' }));
+
 app.use(express.json());
 
 app.use('/api', (req, res, next) => {
@@ -748,6 +803,7 @@ function tokenRole(user) {
     if (user?.admin) return 'admin';
     if (user?.a) return 'directory';
     if (user?.student) return 'student';
+    if (user?.intake) return 'intake';
     return null;
 }
 
@@ -846,6 +902,334 @@ app.get('/api/admin/students', apiLimiter, requireRole('admin'), async (req, res
     }
 });
 
+
+
+// ===== First-year intake portal =====
+//
+// A separate, lower-privilege login for the student volunteers collecting the
+// incoming batch. They can add records and correct their own; nothing here can
+// delete, and nothing here can touch the existing directory.
+
+// Keyed by username, not IP. Fifteen volunteers on one campus network share an
+// address, so an IP-keyed limiter would lock out the whole room the moment one
+// person mistyped a password five times.
+const intakeLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    keyGenerator: (req) => String(req.body?.username || '').toLowerCase().slice(0, 40) || 'anonymous',
+    // The key is a username, not an address, so the built-in IP check does not apply.
+    validate: { ip: false },
+    message: { error: 'Too many attempts for this account. Try again in a few minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const intakeWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    message: { error: 'Slow down a moment, then try again.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Compared against when the username does not exist, so a wrong username and a
+// wrong password take the same time to answer and the form cannot be used to
+// enumerate who has an account.
+const INTAKE_DUMMY_HASH = '$2a$10$pGdLl9BmR67fLQebAdA2Eek.ETuMmoY01NlFQU.OYD8s0M62rIBCe';
+
+function signIntakeToken(username, name) {
+    return jwt.sign({ intake: true, u: username, n: name || username }, JWT_SECRET, { expiresIn: '8h' });
+}
+
+// The volunteer's record is re-read on every request rather than trusting the
+// token alone. Disabling someone has to take effect now, not whenever their
+// eight-hour token happens to expire.
+function requireIntake({ allowPasswordReset = false } = {}) {
+    return (req, res, next) => {
+        requireRole('intake')(req, res, async () => {
+            if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+            try {
+                const username = String(req.user?.u || '');
+                const snap = await firestore.collection(INTAKE_USERS_COLLECTION).doc(username).get();
+                if (!snap.exists) return res.status(403).json({ error: 'Account not found' });
+
+                const user = snap.data() || {};
+                if (user.active === false) return res.status(403).json({ error: 'Account disabled' });
+                if (user.must_reset && !allowPasswordReset) {
+                    return res.status(428).json({ error: 'Set a new password to continue', mustReset: true });
+                }
+
+                req.intakeUser = { ...user, username };
+                next();
+            } catch (e) {
+                console.error('Intake session lookup failed:', e);
+                res.status(500).json({ error: 'Session check failed' });
+            }
+        });
+    };
+}
+
+// Never fails the request it is recording - an unwritable audit line is worth a
+// log entry, not a lost student record.
+async function logIntakeAction(action, usn, by, details = {}) {
+    if (!firestore) return;
+    try {
+        await firestore.collection(INTAKE_AUDIT_COLLECTION).add({
+            action, usn, by, at: new Date().toISOString(), ...details
+        });
+    } catch (e) {
+        console.error('Intake audit write failed:', e);
+    }
+}
+
+// List responses carry the thumbnail only. The full-quality capture is fetched
+// one record at a time, when a card is actually opened.
+function withoutFullPhoto(record) {
+    const { photo, ...rest } = record || {};
+    return { ...rest, has_photo: Boolean(photo) };
+}
+
+app.post('/api/intake/login', intakeLoginLimiter, async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+
+    const username = String(req.body?.username || '').trim().toLowerCase().slice(0, 40);
+    const password = String(req.body?.password || '');
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+
+    try {
+        const snap = await firestore.collection(INTAKE_USERS_COLLECTION).doc(username).get();
+        const user = snap.exists ? snap.data() : null;
+        const matches = await bcrypt.compare(password, user?.password_hash || INTAKE_DUMMY_HASH);
+
+        if (!user || !matches || user.active === false) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+
+        await snap.ref.set({ lastLoginAt: new Date().toISOString() }, { merge: true });
+
+        res.json({
+            success: true,
+            token: signIntakeToken(username, user.name),
+            name: user.name || username,
+            mustReset: Boolean(user.must_reset)
+        });
+    } catch (e) {
+        console.error('Intake login failed:', e);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.get('/api/intake/session', apiLimiter, requireIntake({ allowPasswordReset: true }), (req, res) => {
+    res.json({
+        success: true,
+        username: req.intakeUser.username,
+        name: req.intakeUser.name || req.intakeUser.username,
+        mustReset: Boolean(req.intakeUser.must_reset)
+    });
+});
+
+app.post('/api/intake/change-password', apiLimiter, requireIntake({ allowPasswordReset: true }), async (req, res) => {
+    const currentPassword = String(req.body?.currentPassword || '');
+    const newPassword = String(req.body?.newPassword || '');
+
+    if (newPassword.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    if (newPassword.length > 100) return res.status(400).json({ error: 'New password is too long' });
+    if (newPassword === currentPassword) return res.status(400).json({ error: 'New password must be different from the old one' });
+
+    try {
+        const matches = await bcrypt.compare(currentPassword, req.intakeUser.password_hash || INTAKE_DUMMY_HASH);
+        if (!matches) return res.status(401).json({ error: 'Current password is wrong' });
+
+        await firestore.collection(INTAKE_USERS_COLLECTION).doc(req.intakeUser.username).set({
+            password_hash: await bcrypt.hash(newPassword, 10),
+            must_reset: false,
+            passwordChangedAt: new Date().toISOString()
+        }, { merge: true });
+
+        await logIntakeAction('password_change', '', req.intakeUser.username);
+
+        // A fresh token, so the client is not left holding one minted while the
+        // account was still in must-reset.
+        res.json({ success: true, token: signIntakeToken(req.intakeUser.username, req.intakeUser.name) });
+    } catch (e) {
+        console.error('Intake password change failed:', e);
+        res.status(500).json({ error: 'Could not change password' });
+    }
+});
+
+app.post('/api/intake/students', intakeWriteLimiter, requireIntake(), async (req, res) => {
+    const usn = normalizeIntakeUsn(req.body?.usn);
+    if (!usn) return res.status(400).json({ error: 'Enter a valid USN (6-15 letters or digits)' });
+
+    const { ok, value, errors } = validateStudentPayload(req.body);
+    if (!ok) return res.status(400).json({ error: errors[0], errors });
+
+    try {
+        // The two collections are separate, but a USN copied off an existing
+        // senior's card would be a mess to untangle later, so it is refused now.
+        const senior = await firestore.collection('students').doc(usn).get();
+        if (senior.exists) {
+            return res.status(409).json({ error: usn + ' already belongs to ' + (senior.data()?.name || 'a senior student') });
+        }
+
+        const now = new Date().toISOString();
+        const record = {
+            ...value,
+            usn,
+            batch: FIRST_YEAR_BATCH,
+            year: FIRST_YEAR_YEAR,
+            status: 'active',
+            added_by: req.intakeUser.username,
+            added_by_name: req.intakeUser.name || req.intakeUser.username,
+            createdAt: now,
+            updatedAt: now
+        };
+
+        // create(), not set(): two volunteers photographing the same student at
+        // once should collide loudly rather than silently overwrite each other.
+        await firestore.collection(FIRST_YEAR_COLLECTION).doc(usn).create(record);
+        await logIntakeAction('create', usn, req.intakeUser.username, { name: record.name });
+
+        res.status(201).json({ success: true, usn, missing: missingFields(record) });
+    } catch (e) {
+        if (e?.code === 6 || /already exists/i.test(e?.message || '')) {
+            return res.status(409).json({ error: usn + ' has already been added' });
+        }
+        console.error('Intake create failed:', e);
+        res.status(500).json({ error: 'Could not save student' });
+    }
+});
+
+app.get('/api/intake/students', apiLimiter, requireIntake(), async (req, res) => {
+    try {
+        // Sorted here rather than in the query: an orderBy alongside the
+        // equality filter would need a composite index created first.
+        const snap = await firestore.collection(FIRST_YEAR_COLLECTION)
+            .where('added_by', '==', req.intakeUser.username)
+            .get();
+
+        const students = [];
+        snap.forEach(doc => {
+            const record = doc.data() || {};
+            students.push({ ...withoutFullPhoto(record), missing: missingFields(record) });
+        });
+        students.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+        res.json({ success: true, students });
+    } catch (e) {
+        console.error('Intake list failed:', e);
+        res.status(500).json({ error: 'Could not load your entries' });
+    }
+});
+
+app.get('/api/intake/students/:usn', apiLimiter, requireIntake(), async (req, res) => {
+    const usn = normalizeIntakeUsn(req.params.usn);
+    if (!usn) return res.status(400).json({ error: 'Invalid USN' });
+
+    try {
+        const doc = await firestore.collection(FIRST_YEAR_COLLECTION).doc(usn).get();
+        if (!doc.exists) return res.status(404).json({ error: 'Student not found' });
+
+        const record = doc.data() || {};
+        if (record.added_by !== req.intakeUser.username) {
+            return res.status(403).json({ error: 'You can only open entries you added' });
+        }
+
+        res.json({ success: true, student: record });
+    } catch (e) {
+        console.error('Intake fetch failed:', e);
+        res.status(500).json({ error: 'Could not load that student' });
+    }
+});
+
+app.patch('/api/intake/students/:usn', intakeWriteLimiter, requireIntake(), async (req, res) => {
+    const usn = normalizeIntakeUsn(req.params.usn);
+    if (!usn) return res.status(400).json({ error: 'Invalid USN' });
+
+    // Only known field names survive validation, so a request cannot reach in
+    // and rewrite usn, added_by or the timestamps.
+    const { ok, value, errors } = validateStudentPayload(req.body, { partial: true });
+    if (!ok) return res.status(400).json({ error: errors[0], errors });
+    if (Object.keys(value).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+    try {
+        const ref = firestore.collection(FIRST_YEAR_COLLECTION).doc(usn);
+        const doc = await ref.get();
+        if (!doc.exists) return res.status(404).json({ error: 'Student not found' });
+
+        const record = doc.data() || {};
+        if (record.added_by !== req.intakeUser.username) {
+            return res.status(403).json({ error: 'You can only edit entries you added' });
+        }
+
+        await ref.set({ ...value, updatedAt: new Date().toISOString() }, { merge: true });
+        await logIntakeAction('update', usn, req.intakeUser.username, { fields: Object.keys(value) });
+
+        res.json({ success: true, usn, missing: missingFields({ ...record, ...value }) });
+    } catch (e) {
+        console.error('Intake update failed:', e);
+        res.status(500).json({ error: 'Could not update student' });
+    }
+});
+
+// ===== Admin: first-year batch =====
+
+app.get('/api/admin/first-year', apiLimiter, requireRole('admin'), async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+    try {
+        const snap = await firestore.collection(FIRST_YEAR_COLLECTION).get();
+
+        const students = [];
+        snap.forEach(doc => {
+            const record = doc.data() || {};
+            students.push({ ...withoutFullPhoto(record), missing: missingFields(record) });
+        });
+        students.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+        res.json({ success: true, students });
+    } catch (e) {
+        console.error('First-year list failed:', e);
+        res.status(500).json({ error: 'Error loading data' });
+    }
+});
+
+app.get('/api/admin/first-year/:usn', apiLimiter, requireRole('admin'), async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+    const usn = normalizeIntakeUsn(req.params.usn);
+    if (!usn) return res.status(400).json({ error: 'Invalid USN' });
+
+    try {
+        const doc = await firestore.collection(FIRST_YEAR_COLLECTION).doc(usn).get();
+        if (!doc.exists) return res.status(404).json({ error: 'Student not found' });
+        res.json({ success: true, student: doc.data() });
+    } catch (e) {
+        console.error('First-year fetch failed:', e);
+        res.status(500).json({ error: 'Error loading student' });
+    }
+});
+
+// Deleting is deliberately admin-only: volunteers add and correct their own,
+// but a bad record can only be removed from here.
+app.delete('/api/admin/first-year/:usn', apiLimiter, requireRole('admin'), async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+    const usn = normalizeIntakeUsn(req.params.usn);
+    if (!usn) return res.status(400).json({ error: 'Invalid USN' });
+
+    try {
+        const ref = firestore.collection(FIRST_YEAR_COLLECTION).doc(usn);
+        const doc = await ref.get();
+        if (!doc.exists) return res.status(404).json({ error: 'Student not found' });
+
+        const name = doc.data()?.name || '';
+        await ref.delete();
+        await logIntakeAction('delete', usn, 'admin', { name });
+
+        res.json({ success: true, usn });
+    } catch (e) {
+        console.error('First-year delete failed:', e);
+        res.status(500).json({ error: 'Could not delete student' });
+    }
+});
 
 
 app.post('/api/carpool/request-otp', otpRequestLimiter, async (req, res) => {
@@ -1057,9 +1441,12 @@ app.get('/api/carpool/flights', apiLimiter, requireCarpoolSession, async (req, r
     }
 
     try {
-        const flight = await flightProvider.lookup(number, date);
+        const flight = await lookupFlight(number, date);
         if (!flight) {
             return res.status(404).json({ error: "We couldn't find that flight. Enter your time manually instead." });
+        }
+        if (!isDomesticFlight(flight)) {
+            return res.status(400).json({ error: 'We only cover domestic flights. Enter your time manually instead.' });
         }
         res.json({ success: true, flight, provider: flightProvider.name });
     } catch (err) {
@@ -1098,13 +1485,16 @@ app.post('/api/carpool/requests', apiLimiter, requireCarpoolSession, async (req,
 
             const inbound = direction === 'hostel';
             try {
-                flight = await flightProvider.lookup(flightNumber, flightDate, inbound ? 'Arrival' : 'Departure');
+                flight = await lookupFlight(flightNumber, flightDate, inbound ? 'Arrival' : 'Departure');
             } catch (err) {
                 console.error('Flight lookup failed during trip creation:', err);
                 return res.status(503).json({ error: 'Flight lookup is unavailable. Enter your time manually instead.' });
             }
             if (!flight) {
                 return res.status(404).json({ error: "We couldn't find that flight. Enter your time manually instead." });
+            }
+            if (!isDomesticFlight(flight)) {
+                return res.status(400).json({ error: 'We only cover domestic flights. Enter your time manually instead.' });
             }
 
             if (inbound) {
@@ -1287,12 +1677,65 @@ app.get('/api/cron/birthday', async (req, res) => {
     }
 });
 
+/**
+ * Nightly: fold the board into the learned timetable.
+ *
+ * Two network calls total - one per direction - because the board already
+ * carries both today and tomorrow and the provider caches it. Tomorrow is the
+ * more useful of the two: it is a full day, where today is already half flown.
+ */
+app.get('/api/cron/flight-schedule', async (req, res) => {
+    const expectedSecret = process.env.CRON_SECRET;
+    if (!expectedSecret) {
+        console.error('CRON_SECRET is not configured; refusing to run the flight schedule job.');
+        return res.status(503).json({ error: 'Cron secret not configured' });
+    }
+    if (req.headers.authorization !== `Bearer ${expectedSecret}` && req.query.secret !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (typeof flightProvider.listBoard !== 'function') {
+        return res.status(503).json({
+            error: `Provider "${flightProvider.name}" cannot list a whole board; the schedule job needs skyscanner.`
+        });
+    }
+
+    try {
+        const istToday = new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const istTomorrow = new Date(Date.now() + 5.5 * 60 * 60 * 1000 + 86400000).toISOString().slice(0, 10);
+
+        const totals = { written: 0, skipped: 0 };
+        for (const date of [istToday, istTomorrow]) {
+            for (const direction of ['Arrival', 'Departure']) {
+                const board = await flightProvider.listBoard(date, direction);
+                // Only what we would ever serve. An international row would just
+                // be rejected at lookup, so there is no point learning it.
+                const domestic = board.filter(isDomesticFlight);
+                const result = await recordBoard(flightScheduleStore, domestic);
+                totals.written += result.written;
+                totals.skipped += result.skipped;
+            }
+        }
+
+        const { removed } = await pruneSchedule(flightScheduleStore, { today: istToday });
+        console.log(`Flight schedule: ${totals.written} observations, ${removed} stale entries dropped.`);
+        res.json({ success: true, dates: [istToday, istTomorrow], ...totals, removed });
+    } catch (err) {
+        console.error('❌ Cron: Flight schedule error:', err);
+        res.status(500).json({ error: 'Failed to refresh the flight schedule', details: err.message });
+    }
+});
+
 app.all('/api/*', (req, res) => {
     res.status(404).json({ error: 'Not found' });
 });
 
 app.get('/carpool', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'carpool.html'));
+});
+
+app.get('/intake', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'intake.html'));
 });
 
 app.get('*', (req, res) => {
@@ -1307,6 +1750,16 @@ app.get('*', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
+    // body-parser rejects an oversized or malformed payload before any route
+    // runs. Without these two cases a volunteer whose photo is too big just
+    // gets "Server error", which tells them nothing about what to do next.
+    if (err?.type === 'entity.too.large') {
+        return res.status(413).json({ error: 'That photo is too large to save. Retake it and try again.' });
+    }
+    if (err?.type === 'entity.parse.failed') {
+        return res.status(400).json({ error: 'Malformed request' });
+    }
+    console.error('Unhandled error:', err);
     res.status(500).json({ error: 'Server error' });
 });
 

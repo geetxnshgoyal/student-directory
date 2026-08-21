@@ -905,13 +905,22 @@
                         </div>
                     </div>
 
+                    <!-- View switch -->
+                    <div class="view-switch" role="tablist" aria-label="Choose directory">
+                        <button class="view-btn active" data-view-btn="directory" role="tab"
+                            aria-selected="true">Student Directory</button>
+                        <button class="view-btn" data-view-btn="first-year" role="tab" aria-selected="false">
+                            First Year · 2030 <span id="fy-tab-count" class="count-chip hidden">0</span>
+                        </button>
+                    </div>
+
                     <!-- Stats overview -->
-                    <div class="dashboard-overview">
+                    <div class="dashboard-overview" data-view="directory">
                         <div id="stats-bar" class="stats-bar hidden"></div>
                     </div>
 
                     <!-- Controls -->
-                    <div class="controls-bar">
+                    <div class="controls-bar" data-view="directory">
                         <div class="search-field">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -948,24 +957,56 @@
                     </div>
 
                     <!-- Upcoming birthdays -->
-                    <div id="birthdays-section" class="birthdays-section hidden">
+                    <div id="birthdays-section" class="birthdays-section hidden" data-view="directory">
                         <h3>🎂 Upcoming Birthdays</h3>
                         <div id="birthdays-grid" class="birthdays-grid"></div>
                     </div>
 
                     <!-- Blood Group Distribution -->
-                    <div id="blood-group-section" class="birthdays-section hidden" style="margin-bottom: 30px;">
+                    <div id="blood-group-section" class="birthdays-section hidden" data-view="directory" style="margin-bottom: 30px;">
                         <div id="blood-group-stats" class="blood-group-panel"></div>
                     </div>
 
                     <!-- Directory -->
-                    <div class="grid-heading">
+                    <div class="grid-heading" data-view="directory">
                         <h3>All Students</h3>
                         <span id="student-count" class="count-chip hidden">0</span>
                     </div>
-                    <div id="students-grid" class="admin-grid">
+                    <div id="students-grid" class="admin-grid" data-view="directory">
                         <!-- Student cards injected here -->
                     </div>
+
+                    <!-- ===== First year · Batch of 2030 ===== -->
+                    <div id="first-year-section" data-view="first-year" class="hidden">
+                        <div id="fy-summary" class="fy-summary"></div>
+
+                        <div class="controls-bar">
+                            <div class="search-field">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="11" cy="11" r="8"></circle>
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                                </svg>
+                                <input type="text" id="fy-search" placeholder="Search by name, USN or who added..."
+                                    class="search-input" aria-label="Search first year students">
+                            </div>
+                            <select id="fy-filter" class="sort-select" aria-label="Filter first year students">
+                                <option value="all">All records</option>
+                                <option value="incomplete">Missing details</option>
+                                <option value="complete">Complete only</option>
+                            </select>
+                            <button id="fy-refresh" class="action-btn" title="Reload first year records">
+                                🔄 Refresh
+                            </button>
+                        </div>
+
+                        <div class="grid-heading">
+                            <h3>First Year · Batch of 2030</h3>
+                            <span id="fy-count" class="count-chip">0</span>
+                        </div>
+                        <div id="fy-grid" class="admin-grid"></div>
+                    </div>
+
                 </div>
             </div>
         </div>

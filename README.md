@@ -1,9 +1,10 @@
 # NST Bangalore Student Portal
 
-Two tools for one batch, sharing a codebase, a design system and a Firestore database:
+Three tools for one batch, sharing a codebase, a design system and a Firestore database:
 
 - **Carpool** — students split the campus↔BLR airport run, matched on when they'll actually be at the kerb.
 - **Admin directory** — the student roster, searchable, with birthday automation.
+- **First-year intake** — volunteers collect the incoming batch on their phones, photo and all.
 
 Node + Express, no build step, deployed on Vercel.
 
@@ -21,6 +22,7 @@ npm run dev
 |---|---|
 | `/` or `/carpool` | Carpool (students) |
 | `/admin.html` | Admin directory |
+| `/intake` | First-year intake (volunteers) |
 
 Without Firebase credentials the carpool falls back to in-memory storage, so it runs locally with nothing configured. Without a flight API key it serves canned flights. Nothing hard-fails on missing config.
 
@@ -113,6 +115,58 @@ The in-process scheduler does **not** run a check on boot. It used to, which mea
 
 ---
 
+## First-year intake
+
+`/intake`, a separate low-privilege portal for the student volunteers collecting the incoming batch. They photograph a student, type what they can get on the spot, and save. That is the whole surface: **there is no delete**, and nothing here can read or touch the existing directory.
+
+Records land in their own `students_2030` collection, so a half-filled first-year record can never leak into the carpool board, the birthday mail or the directory stats.
+
+### Accounts
+
+One account per volunteer, not a shared password — so every record is stamped with who added it, and one person can be revoked without rotating for everyone.
+
+```bash
+node scripts/seed-intake-users.js add "Aarpan Lohora" "Vikas Sharma"
+node scripts/seed-intake-users.js add --file volunteers.txt   # one name per line
+node scripts/seed-intake-users.js list                        # who has an account, how many they've added
+node scripts/seed-intake-users.js reset aarpan                # reissue a lost password
+node scripts/seed-intake-users.js disable aarpan
+```
+
+Temporary passwords are printed once and stored only as a bcrypt hash — a lost one is reissued, never recovered. First sign-in forces a password change; until it happens every write returns `428` and the portal shows nothing but the reset form.
+
+The volunteer's record is re-read from Firestore on **every** request rather than trusted from the token, so `disable` takes effect immediately instead of whenever their 8 h token expires.
+
+Login is rate-limited **per username, not per IP**. Fifteen volunteers on one campus network share an address, and an IP-keyed limiter would lock out the whole room the moment one of them mistyped a password five times.
+
+### Photos
+
+Taken in the portal through `getUserMedia` — there is no file picker, so nothing arrives from a camera roll. The largest centred square the sensor offers is drawn to a canvas, which also strips EXIF, then re-encoded down a quality ladder:
+
+```
+1440px q0.94 → 1440 q0.90 → 1280 q0.90 → 1280 q0.85 → 1080 q0.85 → 900 q0.82 → 720 q0.80
+```
+
+The first rung that fits the budget wins, so a photo only loses resolution if it genuinely will not fit. In practice a portrait lands on the first rung at 1440×1440.
+
+The budget exists because base64 in Firestore is bounded by the **hard 1MB per-document limit**, counted against the base64 text rather than the decoded image — so the real ceiling is 1MB/1.33. Reserving room for the thumbnail and every other field leaves ~580KB of JPEG, and the worst case document comes to ~874KB.
+
+A separate 160px thumbnail is saved alongside it. List endpoints return only the thumbnail; the full capture is fetched one record at a time when a card is opened, which keeps a 150-student page under a megabyte instead of over seven.
+
+### What is required
+
+Only **USN, name and photo**. Gender, date of birth, blood group and mobile prompt a confirm if left blank but never block a save — a volunteer who cannot get a blood group on the spot should not hold up the queue. Incomplete records are flagged in both portals so they can be chased later.
+
+Batch is deliberately locked and stored empty until the official split is published; the field is disabled in the form and reads "Released later".
+
+Volunteers can edit **only records they added**. USN is the document key, so it cannot be changed after saving. Creates use Firestore's `create()` rather than `set()`, so two volunteers photographing the same student collide loudly instead of silently overwriting each other.
+
+### In the admin portal
+
+`/admin.html` gains a **First Year · 2030** switch above the dashboard. It shows collected/complete/missing counts, a per-volunteer contribution strip, search across name, USN and who added the record, and a filter for incomplete entries. Opening a card fetches the full-quality photo and offers the only delete in the system.
+
+---
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Everything except Firebase and SMTP has a working fallback.
@@ -148,6 +202,7 @@ Copy `.env.example` to `.env`. Everything except Firebase and SMTP has a working
 Authentication is role-based. Three login paths mint different tokens, and verifying the signature is not enough — `requireRole` checks what the token actually is. Without it a student's own token opened the admin roster.
 
 - Carpool sessions are Firestore-backed opaque tokens, 4 h TTL.
+- Intake tokens are a fourth role, checked against the live account on every request so a disabled volunteer loses access at once. They cannot reach any admin route.
 - OTPs: attempt-capped, constant-time compared, rate-limited separately from the rest of the API.
 - `trust proxy` is set, so rate limits are per-user rather than one shared bucket behind Vercel's proxy.
 - The board exposes names, photos and times only. No USN, email or phone reaches the client — asserted by a test that scans every response for them.
@@ -162,6 +217,7 @@ server.js                     API, auth, matching, email
 public/
   carpool.html/.js/.css       Student carpool
   admin.html/.js              Admin directory
+  intake.html/.js/.css        First-year intake portal
   admin-theme.css             Shared design tokens for admin
   style.css                   Base styles
 scripts/
@@ -169,12 +225,16 @@ scripts/
   flight-schedule.js          Learned schedule estimates
   travel-time.js              Drive time, traffic-aware
   birthday-scheduler.js       Birthday email, idempotent
+  first-year-intake.js        Intake validation and storage budget
+  seed-intake-users.js        Volunteer accounts (add/list/reset/disable)
   export-students.js          Roster → CSV, into gitignored exports/
 ```
 
 ### Firestore collections
 
 `students`, `carpool_otps`, `carpool_sessions`, `carpool_requests`, `carpool_notified`, `birthday_runs` (one document per day).
+
+First-year intake adds three of its own, deliberately separate from `students`: `students_2030` (the incoming batch, keyed by USN), `intake_users` (volunteer accounts) and `intake_audit` (every create, edit and delete).
 
 ---
 

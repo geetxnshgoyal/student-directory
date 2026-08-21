@@ -58,6 +58,7 @@ const ORIGIN_CITIES = [
     { code: 'BBI', city: 'Bhubaneswar' },
     { code: 'BHJ', city: 'Bhuj' },
     { code: 'KUU', city: 'Bhuntar' },
+    { code: 'IXX', city: 'Bidar' },
     { code: 'PAB', city: 'Bilaspur' },
     { code: 'CCJ', city: 'Calicut' },
     { code: 'IXC', city: 'Chandigarh' },
@@ -136,6 +137,7 @@ const ORIGIN_CITIES = [
     { code: 'HSR', city: 'Rajkot' },
     { code: 'IXR', city: 'Ranchi' },
     { code: 'REW', city: 'Rewa' },
+    { code: 'SXV', city: 'Salem' },
     { code: 'SHL', city: 'Shillong' },
     { code: 'VSV', city: 'Shravasti' },
     { code: 'IXS', city: 'Silchar' },
@@ -151,9 +153,30 @@ const ORIGIN_CITIES = [
     { code: 'TCR', city: 'Vagaikulam' },
     { code: 'VNS', city: 'Varanasi' },
     { code: 'GOI', city: 'Vasco da Gama' },
+    { code: 'VDY', city: 'Vidyanagar' },
     { code: 'VGA', city: 'Vijayawada' },
     { code: 'VTZ', city: 'Visakhapatnam' }
 ];
+
+// Domestic only. The browse endpoints get this for free, because the student
+// picks an origin out of ORIGIN_CITIES and that list is Indian by construction.
+// Typing a flight number does not: 6E1214 is Bangkok to BLR and 6E810 is Delhi
+// to BLR, and nothing about the number says which. So the same list doubles as
+// the test, with BLR added back because ORIGIN_CITIES deliberately omits it.
+const DOMESTIC_AIRPORTS = new Set([HOME_AIRPORT, ...ORIGIN_CITIES.map(city => city.code)]);
+
+function isDomesticAirport(code) {
+    return DOMESTIC_AIRPORTS.has(String(code || '').toUpperCase());
+}
+
+/**
+ * Both ends in India. A flight we cannot place at all fails this, which is the
+ * safe direction to fail: better to send someone to manual entry than to time
+ * their carpool off an airport we could not identify.
+ */
+function isDomesticFlight(flight) {
+    return isDomesticAirport(flight?.origin?.code) && isDomesticAirport(flight?.destination?.code);
+}
 
 function carrierOf(flightNumber) {
     const value = normaliseFlightNumber(flightNumber);
@@ -430,6 +453,207 @@ function blrAodbProvider({ fetchImpl = fetch, timeoutMs = 12000, cacheMs = BLR_C
 }
 
 /* ------------------------------------------------------------------ *
+ * Skyscanner's arrivals/departures board.
+ *
+ * The public page at skyscanner.co.in/flights/arrivals-departures/blr renders a
+ * shimmer skeleton and fills it from one JSON call, which is what we call here.
+ * No key, no auth, no cookie: a plain GET answers 200 with the whole board.
+ *
+ * It is the richest free source we have found. Per flight it carries scheduled
+ * AND estimated times for both ends, terminal, arrival gate, boarding gate, a
+ * live status, and the codeshare list. That is everything the AODB feed gives
+ * except the baggage belt, which no free source outside AODB seems to publish.
+ *
+ * Two things to be honest about before switching anything to it:
+ *
+ *   1. robots.txt disallows this path. /g/* is Disallowed for User-agent: *
+ *      (only /g/banana/api/context is carved out), so while the human-facing
+ *      HTML page is fair game, this JSON endpoint sits behind a crawl rule.
+ *      Loading the page in a headless browser instead does not help: that
+ *      route trips a PerimeterX CAPTCHA within seconds.
+ *   2. It only carries today and tomorrow. One call returns a rolling ~48 hour
+ *      window, so like blr-aodb it cannot answer "my flight is next Tuesday".
+ *
+ * So this stays opt-in behind FLIGHT_PROVIDER=skyscanner, same as blr-aodb.
+ * AeroDataBox remains the default because it is licensed and answers for any
+ * future date. Reach for this one when you want same-day gate and status
+ * detail that AeroDataBox's free tier will not give you.
+ * ------------------------------------------------------------------ */
+
+const SKY_ORIGIN = 'https://www.skyscanner.co.in';
+const SKY_BOARD = `${SKY_ORIGIN}/g/arrival-departure-svc/api/airports`;
+const SKY_CACHE_MS = 3 * 60 * 1000;
+
+// A board response is ~850KB and covers two days at once, so one fetch per
+// direction serves every date and origin the page can ask about. Cache hard.
+const SKY_PAGE = '/flights/arrivals-departures/blr/bengaluru-arrivals-departures';
+
+/**
+ * The feed publishes each time twice: once as UTC ("2026-08-07T02:10Z") and
+ * once as local wall clock with no offset ("2026-08-07T07:40"). Parse the UTC
+ * one for arithmetic and keep the local one only for deciding which day a
+ * flight belongs to, since "my flight on the 8th" means the 8th in Bangalore.
+ */
+function parseSkyTime(value) {
+    const raw = String(value || '');
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+/**
+ * Status describes the whole flight's progress, not its position relative to
+ * BLR, so the same mapping serves both boards. Verified against live rows:
+ * a departure sitting at IN_GATE has already landed at its destination, and
+ * an arrival at OUT_GATE has only just pushed back from its origin.
+ */
+function mapSkyStatus(row) {
+    if (row?.isDiverted) return 'diverted';
+    switch (String(row?.status || '').toUpperCase()) {
+        case 'CANCELLED': return 'cancelled';
+        case 'IN_GATE':
+        case 'LANDED':
+        case 'PAST_FLIGHT': return 'landed';
+        case 'IN_AIR':
+        case 'OUT_GATE': return 'departed';
+        // DELAYED is still an intention, not a movement: the aircraft has not
+        // gone anywhere yet, it is just going later than printed.
+        case 'DELAYED':
+        case 'EXPECTED':
+        case 'NO_TAKEOFF_INFO':
+        case 'SCHEDULED': return 'scheduled';
+        default: return 'unknown';
+    }
+}
+
+function fromSkyRow(row, date, direction = 'Arrival') {
+    const outbound = direction === 'Departure';
+    const other = outbound
+        ? { code: row.arrivalAirportCode, name: row.arrivalAirportName }
+        : { code: row.departureAirportCode, name: row.departureAirportName };
+
+    const scheduledArrival = parseSkyTime(row.scheduledArrivalTime);
+    const estimatedArrival = parseSkyTime(row.estimatedArrivalTime);
+    const status = mapSkyStatus(row);
+
+    return {
+        number: normaliseFlightNumber(row.flightNumber),
+        // airlineId is not an IATA code here - IndiGo comes through as "49" and
+        // Akasa as "C)" - so trust the display name and derive the code from
+        // the flight number, which is the one field that is always clean.
+        airline: row.airlineName || CARRIERS[carrierOf(row.flightNumber)] || null,
+        date,
+        direction: outbound ? 'departure' : 'arrival',
+        origin: outbound ? { code: HOME_AIRPORT, name: 'Bengaluru' } : { code: other.code || null, name: other.name || null },
+        destination: outbound ? { code: other.code || null, name: other.name || null } : { code: HOME_AIRPORT, name: 'Bengaluru' },
+        scheduledDeparture: outbound ? parseSkyTime(row.scheduledDepartureTime) : null,
+        estimatedDeparture: outbound ? parseSkyTime(row.estimatedDepartureTime) : null,
+        scheduledArrival,
+        estimatedArrival,
+        actualArrival: status === 'landed' ? (estimatedArrival ?? scheduledArrival) : null,
+        status,
+        // The raw label carries detail the five-state model flattens away, and
+        // "Delayed" is exactly what someone waiting at the kerb wants to see.
+        statusLabel: row.status || null,
+        terminal: (outbound ? row.departureTerminal : row.arrivalTerminal) || null,
+        // No free source outside the AODB publishes a belt. Never invent one.
+        belt: null,
+        // arrivalGate is where it parks at BLR; boardingGate is where it boards.
+        // On an arrivals row boardingGate belongs to the *origin* airport, so
+        // only read the one that describes this end of the trip.
+        gate: (outbound ? row.boardingGate : row.arrivalGate) || null
+    };
+}
+
+function skyscannerProvider({ fetchImpl = fetch, timeoutMs = 15000, cacheMs = SKY_CACHE_MS, airport = HOME_AIRPORT } = {}) {
+    const cache = new Map(); // "arrivals" | "departures" -> { at, rows }
+
+    async function fetchBoard(direction = 'Arrival') {
+        const key = direction === 'Departure' ? 'departures' : 'arrivals';
+        const hit = cache.get(key);
+        if (hit && Date.now() - hit.at < cacheMs) return hit.rows;
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        let res;
+        try {
+            res = await fetchImpl(`${SKY_BOARD}/${String(airport).toLowerCase()}/${key}?locale=en-GB`, {
+                headers: {
+                    Accept: 'application/json',
+                    'Accept-Language': 'en-IN,en;q=0.9',
+                    Referer: `${SKY_ORIGIN}${SKY_PAGE}`,
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                        + ' (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                },
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
+
+        if (!res.ok) throw new Error(`Skyscanner board failed (${res.status})`);
+        const body = await res.json();
+        // The response always has both keys; the one you did not ask for is null.
+        const rows = Array.isArray(body?.[key]) ? body[key] : [];
+        cache.set(key, { at: Date.now(), rows });
+        return rows;
+    }
+
+    // Which calendar day a row belongs to, in Bangalore wall clock. The board
+    // spans today and tomorrow, so every query has to narrow it down.
+    function onDate(row, date, outbound) {
+        const local = outbound ? row.localisedScheduledDepartureTime : row.localisedScheduledArrivalTime;
+        return String(local || '').slice(0, 10) === date;
+    }
+
+    return {
+        name: 'skyscanner',
+        /**
+         * Every flight on one side of the board for one day, unfiltered by
+         * carrier. The nightly schedule snapshot needs the whole picture, not
+         * just the routes a student happens to be browsing.
+         */
+        async listBoard(date, direction = 'Arrival') {
+            const outbound = direction === 'Departure';
+            const rows = await fetchBoard(direction);
+            return rows
+                .filter(r => onDate(r, date, outbound))
+                .map(r => fromSkyRow(r, date, direction));
+        },
+        async lookup(flightNumber, date, direction = 'Arrival') {
+            const wanted = normaliseFlightNumber(flightNumber);
+            const outbound = direction === 'Departure';
+            const rows = await fetchBoard(direction);
+            const row = rows.find(r =>
+                normaliseFlightNumber(r.flightNumber) === wanted && onDate(r, date, outbound));
+            return row ? fromSkyRow(row, date, direction) : null;
+        },
+        async searchArrivals(originCode, date) {
+            const from = String(originCode || '').toUpperCase();
+            const rows = await fetchBoard('Arrival');
+            return rows
+                .filter(r => (r.departureAirportCode || '').toUpperCase() === from)
+                .filter(r => onDate(r, date, false))
+                .filter(r => isSupportedCarrier(r.flightNumber))
+                .map(r => fromSkyRow(r, date, 'Arrival'))
+                .filter(f => Number.isFinite(f.scheduledArrival))
+                .sort((a, b) => a.scheduledArrival - b.scheduledArrival);
+        },
+        async searchDepartures(destinationCode, date) {
+            const to = String(destinationCode || '').toUpperCase();
+            const rows = await fetchBoard('Departure');
+            return rows
+                .filter(r => (r.arrivalAirportCode || '').toUpperCase() === to)
+                .filter(r => onDate(r, date, true))
+                .filter(r => isSupportedCarrier(r.flightNumber))
+                .map(r => fromSkyRow(r, date, 'Departure'))
+                .filter(f => Number.isFinite(f.scheduledDeparture))
+                .sort((a, b) => a.scheduledDeparture - b.scheduledDeparture);
+        }
+    };
+}
+
+/* ------------------------------------------------------------------ *
  * AeroDataBox via RapidAPI.
  * ------------------------------------------------------------------ */
 
@@ -574,13 +798,21 @@ function aeroDataBoxProvider(apiKey, { fetchImpl = fetch, timeoutMs = 8000, minG
 /* ------------------------------------------------------------------ */
 
 function getFlightProvider(env = process.env) {
-    // AeroDataBox is the default: licensed, documented, and it answers for
-    // future dates, which the airport feed does not. blr-aodb stays opt-in.
+    // Skyscanner is the default. It needs no key, is not rate limited into
+    // uselessness, and carries terminal, gate and live status where the
+    // AeroDataBox free tier carries much less.
+    //
+    // Its one weakness is the rolling 48 hour window, which is why
+    // scripts/flight-schedule.js exists: a nightly snapshot learns the repeating
+    // timetable so a flight booked for next Tuesday still resolves.
+    //
+    // aerodatabox is left reachable but is no longer used by default. It costs a
+    // RapidAPI key and answers with less. Delete the branch when you are sure.
     const choice = String(env.FLIGHT_PROVIDER || '').toLowerCase();
     if (choice === 'stub') return stubProvider();
     if (choice === 'blr-aodb') return blrAodbProvider();
-    if (env.FLIGHT_API_KEY) return aeroDataBoxProvider(env.FLIGHT_API_KEY);
-    return stubProvider();
+    if (choice === 'aerodatabox' && env.FLIGHT_API_KEY) return aeroDataBoxProvider(env.FLIGHT_API_KEY);
+    return skyscannerProvider();
 }
 
 /**
@@ -613,11 +845,16 @@ module.exports = {
     HOME_AIRPORT,
     carrierOf,
     isSupportedCarrier,
+    isDomesticAirport,
+    isDomesticFlight,
     stubProvider,
     aeroDataBoxProvider,
     blrAodbProvider,
+    skyscannerProvider,
     parseAodbTime,
     mapAodbStatus,
+    parseSkyTime,
+    mapSkyStatus,
     computeReadyTime,
     normaliseFlightNumber,
     isValidFlightNumber,
