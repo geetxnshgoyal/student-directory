@@ -157,7 +157,11 @@ A separate 160px thumbnail is saved alongside it. List endpoints return only the
 
 Only **USN, name and photo**. Gender, date of birth, blood group and mobile prompt a confirm if left blank but never block a save — a volunteer who cannot get a blood group on the spot should not hold up the queue. Incomplete records are flagged in both portals so they can be chased later.
 
-Batch is deliberately locked and stored empty until the official split is published; the field is disabled in the form and reads "Released later".
+Batch is never typed in. The official list was published as **names only, no USNs**, so the batch is derived from the name: as the volunteer types, the form previews the match, and the server runs the same lookup again on save. A stale or edited form cannot decide anybody's batch.
+
+Names are a weak key, so the lookup refuses to guess. Of the 231 students on the list, 227 resolve on their own. The rest need a person: three unrelated students are all called **Shivam Kumar** and they are in three different batches, and one student is recorded only as **Aryan** while seven others are Aryan-something. In those cases the form shows a picker instead of an answer. A name that is not on the list at all still saves — without a batch, flagged for someone to sort out later — because losing a photo and a blood group over a spelling is the worse outcome.
+
+Records entered before the list existed are filled in by `npm run batches:backfill` (dry run; add `-- --apply` to write). It reports anything it could not decide rather than guessing.
 
 Volunteers can edit **only records they added**. USN is the document key, so it cannot be changed after saving. Creates use Firestore's `create()` rather than `set()`, so two volunteers photographing the same student collide loudly instead of silently overwriting each other.
 

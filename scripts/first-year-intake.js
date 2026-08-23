@@ -9,10 +9,7 @@ const FIRST_YEAR_COLLECTION = 'students_2030';
 const INTAKE_USERS_COLLECTION = 'intake_users';
 const INTAKE_AUDIT_COLLECTION = 'intake_audit';
 
-// The official batch split is released later in the year. Until then every
-// record carries an empty batch and the form keeps the field disabled, so
 // nobody guesses a value we would have to unpick afterwards.
-const FIRST_YEAR_BATCH = '';
 const FIRST_YEAR_YEAR = 1;
 
 // Photos are kept at the best quality the storage allows, not the smallest
@@ -225,7 +222,6 @@ module.exports = {
     FIRST_YEAR_COLLECTION,
     INTAKE_USERS_COLLECTION,
     INTAKE_AUDIT_COLLECTION,
-    FIRST_YEAR_BATCH,
     FIRST_YEAR_YEAR,
     MAX_PHOTO_BYTES,
     MAX_THUMB_BYTES,

@@ -359,13 +359,83 @@ function readForm() {
         email: el('f-email').value.trim(),
         institutional_email: el('f-inst-email').value.trim(),
         github: el('f-github').value.trim(),
-        linkedin: el('f-linkedin').value.trim()
+        linkedin: el('f-linkedin').value.trim(),
+        // Only meaningful when the name matched more than one student; the
+        // server ignores it otherwise and derives the batch itself.
+        section: el('f-section').value
     };
 }
 
+// ===== batch, from the official list =====
+
+// The batch is never typed in. It is looked up from the published roster by
+// name, because names are the only key that list gives us. This is a preview:
+// the server runs the same lookup again when the record is saved, so a stale
+// or tampered form cannot decide anybody's batch.
+let batchTimer = null;
+
+function clearBatch(text) {
+    el('f-batch').value = text;
+    el('batch-hint').textContent = 'Filled in from the official list as you type the name.';
+    el('f-section').classList.add('hidden');
+    el('f-section').innerHTML = '<option value="">Which one?</option>';
+}
+
+function applyBatch(result) {
+    const picker = el('f-section');
+
+    // Three students are called Shivam Kumar and they are in three different
+    // batches. No amount of matching fixes that, so the volunteer is asked.
+    if (result.status === 'ambiguous') {
+        el('f-batch').value = 'Pick one below';
+        el('batch-hint').textContent =
+            result.candidates.length + ' students on the list share that name, in different batches.';
+        picker.innerHTML = '<option value="">Which one?</option>' + result.candidates
+            .map((c) => '<option value="' + c.label + '">' + c.name + ' — ' + c.label + '</option>')
+            .join('');
+        picker.classList.remove('hidden');
+        return;
+    }
+
+    picker.classList.add('hidden');
+    picker.innerHTML = '<option value="">Which one?</option>';
+
+    // Not being on the list is not a reason to lose the photo and the blood
+    // group. It saves without a batch and someone sorts it out later.
+    if (result.status === 'none') {
+        el('f-batch').value = 'Not on the list';
+        el('batch-hint').textContent = 'This name is not on the official list. The record still saves without a batch.';
+        return;
+    }
+
+    el('f-batch').value = result.label;
+    el('batch-hint').textContent = result.status === 'exact'
+        ? 'Matched ' + result.matched[0] + '.'
+        : 'Closest match is ' + result.matched[0] + '. Check that is the right student.';
+}
+
+async function lookupBatchFor(name) {
+    if (!name.trim()) return clearBatch('Enter a name first');
+    try {
+        applyBatch(await api('/api/intake/batch-lookup?name=' + encodeURIComponent(name)));
+    } catch {
+        // A failed preview is not worth blocking on - the save resolves the
+        // batch server-side regardless of what this field is showing.
+        clearBatch('Checked on save');
+    }
+}
+
+el('f-name').addEventListener('input', () => {
+    clearTimeout(batchTimer);
+    batchTimer = setTimeout(() => lookupBatchFor(el('f-name').value), 250);
+});
+
 function resetForm() {
     studentForm.reset();
-    el('f-batch').value = 'Released later';
+    el('f-batch').value = 'Enter a name first';
+    el('batch-hint').textContent = 'Filled in from the official list as you type the name.';
+    el('f-section').classList.add('hidden');
+    el('f-section').innerHTML = '<option value="">Which one?</option>';
     el('f-usn').disabled = false;
     capture = null;
     editingUsn = null;
@@ -492,6 +562,7 @@ mineGrid.addEventListener('click', async (e) => {
         el('f-usn').value = student.usn || '';
         el('f-usn').disabled = true;      // the document key cannot move
         el('f-name').value = student.name || '';
+        lookupBatchFor(student.name || '');
         el('f-gender').value = student.gender || '';
         el('f-blood').value = student.blood_group || '';
         el('f-mobile').value = student.mobile_number || '';

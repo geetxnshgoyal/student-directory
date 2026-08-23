@@ -257,10 +257,14 @@
 
                                 <div class="form-field">
                                     <label class="field-label" for="f-batch">Batch</label>
-                                    <input type="text" id="f-batch" class="search-input" value="Released later"
+                                    <input type="text" id="f-batch" class="search-input" value="Enter a name first"
                                         disabled>
-                                    <span class="field-hint">The official batch split is not out yet, so this stays
-                                        locked.</span>
+                                    <select id="f-section" class="sort-select hidden"
+                                        aria-label="Choose which student this is">
+                                        <option value="">Which one?</option>
+                                    </select>
+                                    <span class="field-hint" id="batch-hint">Filled in from the official list as you
+                                        type the name.</span>
                                 </div>
                             </div>
 

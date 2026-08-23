@@ -830,6 +830,17 @@ function renderFirstYearSummary() {
     const total = firstYearStudents.length;
     const complete = firstYearStudents.filter(s => (s.missing || []).length === 0).length;
 
+    // Names were the only key the official list gave us, so a handful of
+    // records land without a batch. They are worth counting separately: they
+    // are the ones somebody has to settle by hand.
+    const unplaced = firstYearStudents.filter(s => !s.batch).length;
+    const bySection = {};
+    firstYearStudents.forEach(s => {
+        if (!s.batch) return;
+        const label = s.batch + (s.section ? ' ' + s.section : '');
+        bySection[label] = (bySection[label] || 0) + 1;
+    });
+
     const byVolunteer = {};
     firstYearStudents.forEach(s => {
         const who = s.added_by_name || s.added_by || 'unknown';
@@ -850,10 +861,16 @@ function renderFirstYearSummary() {
             <div class="fy-stat"><span class="fy-stat-value">${total}</span><span class="fy-stat-label">collected</span></div>
             <div class="fy-stat"><span class="fy-stat-value">${complete}</span><span class="fy-stat-label">complete</span></div>
             <div class="fy-stat"><span class="fy-stat-value">${total - complete}</span><span class="fy-stat-label">missing details</span></div>
+            ${unplaced ? `<div class="fy-stat"><span class="fy-stat-value">${unplaced}</span><span class="fy-stat-label">no batch yet</span></div>` : ''}
         </div>
+        ${Object.keys(bySection).length ? `<div class="fy-contributors"><span class="fy-contrib-label">Batches</span>${
+            Object.entries(bySection).sort().map(([label, n]) => `<span class="fy-chip">${escapeHtml(label)} <b>${n}</b></span>`).join('')
+        }</div>` : ''}
         ${contributors ? `<div class="fy-contributors"><span class="fy-contrib-label">Added by</span>${contributors}</div>` : ''}
-        <p class="fy-note">Batch is locked until the official split is published. Records live in a separate
-            collection and do not appear in the directory, carpool or birthday mail.</p>`;
+        <p class="fy-note">Batches come from the official list, matched on name when a record is saved. Anything
+            marked <b>no batch</b> is a name the list could not decide - three students share the name Shivam Kumar -
+            and needs setting by hand. Records live in a separate collection and do not appear in the directory,
+            carpool or birthday mail.</p>`;
 }
 
 function renderFirstYear() {
@@ -896,7 +913,11 @@ function renderFirstYear() {
                 <div class="entry-body">
                     <p class="entry-name">${escapeHtml(s.name || 'Unknown')}</p>
                     <span class="entry-usn">${escapeHtml(s.usn || '')}</span>
-                    <div class="entry-flags">${flags}</div>
+                    <div class="entry-flags">${
+                        s.batch
+                            ? `<span class="flag ok">${escapeHtml(s.batch + (s.section ? ' ' + s.section : ''))}</span>`
+                            : '<span class="flag">no batch</span>'
+                    }${flags}</div>
                     <div class="fy-added-by">added by ${escapeHtml(s.added_by_name || s.added_by || 'unknown')}</div>
                 </div>
             </div>`;

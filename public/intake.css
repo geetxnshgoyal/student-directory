@@ -297,16 +297,6 @@
     display: none;
 }
 
-@media (max-width: 560px) {
-    .form-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .photo-controls .action-btn {
-        flex: 1;
-        min-width: 120px;
-    }
-}
 
 /* ===== Rules the admin dashboard keeps in its own inline <style> =====
    admin.html defines these privately, so they are not reachable from a second
@@ -472,4 +462,80 @@
     font-size: 0.95rem;
     height: auto;
     line-height: 1.4;
+}
+
+/* ===== Phones =====
+   This portal is used on a phone by design - a volunteer stands in front of a
+   student, photographs them, and types what they say. So the small screen is
+   the real one, not a fallback. */
+
+@media (max-width: 560px) {
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .photo-controls .action-btn {
+        flex: 1;
+        min-width: 120px;
+    }
+
+    /* Desktop padding nests 20px of container inside 32px of card, which on a
+       375px screen left the form living in 269px of it. */
+    .container {
+        padding: 16px 12px 40px;
+    }
+
+    .card-content {
+        padding: 20px 16px;
+    }
+
+    .search-section .glass-card {
+        margin-top: 24px;
+    }
+
+    /* iOS zooms the page whenever a focused field is under 16px. On a form this
+       long that means fighting the zoom back out at every single tap, so the
+       inputs go up to 16px here even though 15.2px reads better on a desktop. */
+    .search-input,
+    .form-field .sort-select,
+    input,
+    select,
+    textarea {
+        font-size: 16px;
+    }
+
+    /* Thumbs, not cursors. */
+    .action-btn,
+    .verify-btn,
+    .logout-btn,
+    .tab-btn {
+        min-height: 44px;
+    }
+
+    .theme-toggle {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Two half-width buttons side by side invite the wrong one. Stack them and
+       let Save be the obvious target. */
+    .form-actions {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .form-actions .verify-btn,
+    .form-actions .action-btn {
+        width: 100%;
+    }
+
+    /* The camera is the first thing on the page and should not push the form
+       off the bottom of a short screen. */
+    .photo-stage {
+        max-width: 280px;
+    }
+
+    .photo-block {
+        margin-bottom: 20px;
+    }
 }

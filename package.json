@@ -8,7 +8,8 @@
     "dev": "npx nodemon server.js",
     "students:normalize-fields": "node scripts/normalize-student-fields.js",
     "photos:migrate-base64": "node scripts/migrate-cloudinary-photos-to-base64.js",
-    "photos:migrate-base64:apply": "node scripts/migrate-cloudinary-photos-to-base64.js --apply"
+    "photos:migrate-base64:apply": "node scripts/migrate-cloudinary-photos-to-base64.js --apply",
+    "batches:backfill": "node scripts/backfill-first-year-batches.js"
   },
   "dependencies": {
     "axios": "^1.19.0",

@@ -5,6 +5,7 @@
 //
 //   node scripts/seed-intake-users.js add "Aarpan Lohora" "Vikas Sharma"
 //   node scripts/seed-intake-users.js add --file volunteers.txt
+//   node scripts/seed-intake-users.js add "Geetansh Goyal" --password hunter2
 //   node scripts/seed-intake-users.js list
 //   node scripts/seed-intake-users.js reset aarpan
 //   node scripts/seed-intake-users.js disable aarpan
@@ -71,9 +72,20 @@ function connect() {
     return getFirestore();
 }
 
-async function add(db, names) {
+async function add(db, names, chosenPassword) {
     if (names.length === 0) {
         console.error('Give at least one name, or --file <path> with one name per line.');
+        process.exit(1);
+    }
+
+    // One chosen password shared across several accounts would undo the whole
+    // point of per-volunteer logins, so it is only allowed for a single name.
+    if (chosenPassword && names.length > 1) {
+        console.error('--password sets one account. Drop it to have a different password generated for each name.');
+        process.exit(1);
+    }
+    if (chosenPassword && chosenPassword.length < 8) {
+        console.error('Password must be at least 8 characters.');
         process.exit(1);
     }
 
@@ -90,12 +102,14 @@ async function add(db, names) {
             username = `${usernameFor(name)}${suffix}`;
         }
 
-        const password = generatePassword();
+        // A generated password is a hand-out, so it expires on first use. One the
+        // admin chose deliberately is theirs to keep, and is not forced to change.
+        const password = chosenPassword || generatePassword();
         await db.collection(INTAKE_USERS_COLLECTION).doc(username).set({
             username,
             name: name.trim(),
             password_hash: await bcrypt.hash(password, 10),
-            must_reset: true,
+            must_reset: !chosenPassword,
             active: true,
             createdAt: new Date().toISOString()
         });
@@ -108,7 +122,9 @@ async function add(db, names) {
     console.log(pad('NAME', 30) + pad('USERNAME', 18) + 'TEMP PASSWORD');
     console.log('-'.repeat(64));
     created.forEach(c => console.log(pad(c.name, 30) + pad(c.username, 18) + c.password));
-    console.log('\nEach volunteer is asked to set their own password on first sign-in.');
+    console.log(chosenPassword
+        ? '\nChosen password, so no reset is forced on first sign-in.'
+        : '\nEach volunteer is asked to set their own password on first sign-in.');
     console.log('Portal: /intake\n');
 }
 
@@ -182,11 +198,15 @@ async function main() {
 
     switch (command) {
         case 'add': {
+            const pwFlag = rest.indexOf('--password');
+            const chosenPassword = pwFlag === -1 ? null : rest[pwFlag + 1];
+            if (pwFlag !== -1) rest.splice(pwFlag, 2);
+
             const fileFlag = rest.indexOf('--file');
             const names = fileFlag === -1
                 ? rest
                 : fs.readFileSync(rest[fileFlag + 1], 'utf8').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-            return add(db, names);
+            return add(db, names, chosenPassword);
         }
         case 'list':
             return list(db);

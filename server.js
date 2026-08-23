@@ -63,12 +63,12 @@ const {
     FIRST_YEAR_COLLECTION,
     INTAKE_USERS_COLLECTION,
     INTAKE_AUDIT_COLLECTION,
-    FIRST_YEAR_BATCH,
     FIRST_YEAR_YEAR,
     validateStudentPayload,
     normalizeUsn: normalizeIntakeUsn,
     missingFields
 } = require('./scripts/first-year-intake');
+const { lookupBatch } = require('./scripts/first-year-batch-list');
 
 const app = express();
 // Vercel terminates TLS in front of us. Without this every request looks like it
@@ -1057,6 +1057,32 @@ app.post('/api/intake/change-password', apiLimiter, requireIntake({ allowPasswor
     }
 });
 
+// The official list is names only, so a record's batch is derived from its name
+// here at write time rather than accepted from the form. A volunteer cannot put
+// a student in the wrong batch, and the answer cannot drift if the client is
+// stale. Where the name genuinely cannot decide - there are three unrelated
+// Shivam Kumars, in three different batches - the record still saves, with the
+// batch left blank and marked for someone to settle by hand.
+function resolveBatch(name, chosenLabel) {
+    const found = lookupBatch(name);
+
+    if (found.status === 'ambiguous') {
+        const picked = found.candidates.find((c) => c.label === chosenLabel);
+        return picked
+            ? { batch: picked.batch, section: picked.section, batch_match: 'manual' }
+            : { batch: '', section: '', batch_match: 'ambiguous' };
+    }
+    if (found.status === 'none') return { batch: '', section: '', batch_match: 'none' };
+    return { batch: found.batch, section: found.section, batch_match: found.status };
+}
+
+// Lets the form show the batch as the name is typed. Read-only, and it repeats
+// the same call the write path will make, so the preview cannot disagree with
+// what actually gets stored.
+app.get('/api/intake/batch-lookup', apiLimiter, requireIntake(), (req, res) => {
+    res.json({ success: true, ...lookupBatch(req.query?.name) });
+});
+
 app.post('/api/intake/students', intakeWriteLimiter, requireIntake(), async (req, res) => {
     const usn = normalizeIntakeUsn(req.body?.usn);
     if (!usn) return res.status(400).json({ error: 'Enter a valid USN (6-15 letters or digits)' });
@@ -1076,7 +1102,7 @@ app.post('/api/intake/students', intakeWriteLimiter, requireIntake(), async (req
         const record = {
             ...value,
             usn,
-            batch: FIRST_YEAR_BATCH,
+            ...resolveBatch(value.name, req.body?.section),
             year: FIRST_YEAR_YEAR,
             status: 'active',
             added_by: req.intakeUser.username,
@@ -1162,7 +1188,14 @@ app.patch('/api/intake/students/:usn', intakeWriteLimiter, requireIntake(), asyn
             return res.status(403).json({ error: 'You can only edit entries you added' });
         }
 
-        await ref.set({ ...value, updatedAt: new Date().toISOString() }, { merge: true });
+        // A corrected spelling can change which roster row the student matches,
+        // so the batch is re-derived rather than left at whatever the first
+        // attempt produced.
+        const rebatched = Object.hasOwn(value, 'name')
+            ? resolveBatch(value.name, req.body?.section)
+            : {};
+
+        await ref.set({ ...value, ...rebatched, updatedAt: new Date().toISOString() }, { merge: true });
         await logIntakeAction('update', usn, req.intakeUser.username, { fields: Object.keys(value) });
 
         res.json({ success: true, usn, missing: missingFields({ ...record, ...value }) });
