@@ -132,6 +132,17 @@ sendOtpBtn.addEventListener('click', async () => {
     }
 });
 
+// Sending a mail is pointless when the permanent code is what gets typed
+// anyway, so this jumps straight to the code entry without asking the server
+// for one. /api/admin/verify already accepts either code, so nothing on the
+// server needs to know the difference.
+document.getElementById('use-permanent-otp').addEventListener('click', () => {
+    hideMessage();
+    requestView.classList.add('hidden');
+    otpView.classList.remove('hidden');
+    document.getElementById('admin-otp').focus();
+});
+
 // 2. Verify OTP
 verifyOtpBtn.addEventListener('click', async () => {
     const otp = document.getElementById('admin-otp')?.value;
@@ -758,6 +769,7 @@ document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
 
 let firstYearStudents = [];
 let firstYearLoaded = false;
+let fyChipFilter = null;   // {type:'batch'|'person', value:string}
 
 // Names here are typed by volunteers rather than curated, so nothing reaches
 // innerHTML without being escaped first.
@@ -849,7 +861,9 @@ function renderFirstYearSummary() {
 
     const contributors = Object.entries(byVolunteer)
         .sort((a, b) => b[1] - a[1])
-        .map(([who, n]) => `<span class="fy-chip">${escapeHtml(who)} <b>${n}</b></span>`)
+        .map(([who, n]) => `<button type="button" class="fy-chip${
+            fyChipFilter?.type === 'person' && fyChipFilter.value === who ? ' active' : ''
+        }" data-fy-chip="person" data-fy-value="${escapeHtml(who)}">${escapeHtml(who)} <b>${n}</b></button>`)
         .join('');
 
     const tabCount = document.getElementById('fy-tab-count');
@@ -864,7 +878,9 @@ function renderFirstYearSummary() {
             ${unplaced ? `<div class="fy-stat"><span class="fy-stat-value">${unplaced}</span><span class="fy-stat-label">no batch yet</span></div>` : ''}
         </div>
         ${Object.keys(bySection).length ? `<div class="fy-contributors"><span class="fy-contrib-label">Batches</span>${
-            Object.entries(bySection).sort().map(([label, n]) => `<span class="fy-chip">${escapeHtml(label)} <b>${n}</b></span>`).join('')
+            Object.entries(bySection).sort().map(([label, n]) => `<button type="button" class="fy-chip${
+                fyChipFilter?.type === 'batch' && fyChipFilter.value === label ? ' active' : ''
+            }" data-fy-chip="batch" data-fy-value="${escapeHtml(label)}">${escapeHtml(label)} <b>${n}</b></button>`).join('')
         }</div>` : ''}
         ${contributors ? `<div class="fy-contributors"><span class="fy-contrib-label">Added by</span>${contributors}</div>` : ''}
         <p class="fy-note">Batches come from the official list, matched on name when a record is saved. Anything
@@ -879,6 +895,12 @@ function renderFirstYear() {
     const grid = document.getElementById('fy-grid');
 
     const rows = firstYearStudents.filter(s => {
+        if (fyChipFilter?.type === 'batch') {
+            const label = s.batch ? s.batch + (s.section ? ' ' + s.section : '') : '';
+            if (label !== fyChipFilter.value) return false;
+        }
+        if (fyChipFilter?.type === 'person' && (s.added_by_name || s.added_by || 'unknown') !== fyChipFilter.value) return false;
+
         const missing = (s.missing || []).length > 0;
         if (filter === 'incomplete' && !missing) return false;
         if (filter === 'complete' && missing) return false;
@@ -930,6 +952,18 @@ document.getElementById('fy-refresh').addEventListener('click', loadFirstYear);
 
 // The list carries thumbnails only, so the full-quality photo is fetched when a
 // card is actually opened.
+document.getElementById('fy-summary').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-fy-chip]');
+    if (!chip) return;
+
+    const next = { type: chip.dataset.fyChip, value: chip.dataset.fyValue };
+    const same = fyChipFilter?.type === next.type && fyChipFilter.value === next.value;
+    fyChipFilter = same ? null : next;
+
+    renderFirstYearSummary();
+    renderFirstYear();
+});
+
 document.getElementById('fy-grid').addEventListener('click', async (e) => {
     const card = e.target.closest('[data-fy-usn]');
     if (!card) return;
@@ -992,7 +1026,7 @@ function openFirstYearModal(s) {
                 ${row('Mobile', s.mobile_number, 'pc-mono')}
                 ${row('Email', s.email, 'pc-mono pc-wrap')}
                 ${row('College email', s.institutional_email, 'pc-mono pc-wrap')}
-                ${row('Batch', 'Released later')}
+                ${row('Batch', s.batch ? s.batch + (s.section ? ' ' + s.section : '') : 'Not on the official list')}
                 ${row('Added by', s.added_by_name || s.added_by)}
                 ${row('Added on', String(s.createdAt || '').slice(0, 10))}
             </div>

@@ -757,7 +757,7 @@ app.use('/api', (req, res, next) => {
 
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 5,
+    limit: 5,
     message: { error: 'Too many attempts' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -765,13 +765,13 @@ const authLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 60,
+    limit: 60,
     message: { error: 'Rate limit exceeded' },
 });
 
 const otpRequestLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 6,
+    limit: 6,
     message: { error: 'Too many code requests. Try again in a few minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -779,7 +779,7 @@ const otpRequestLimiter = rateLimit({
 
 const otpVerifyLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 12,
+    limit: 12,
     message: { error: 'Too many attempts. Try again in a few minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -915,7 +915,7 @@ app.get('/api/admin/students', apiLimiter, requireRole('admin'), async (req, res
 // person mistyped a password five times.
 const intakeLoginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10,
+    limit: 10,
     keyGenerator: (req) => String(req.body?.username || '').toLowerCase().slice(0, 40) || 'anonymous',
     // The key is a username, not an address, so the built-in IP check does not apply.
     validate: { ip: false },
@@ -926,7 +926,7 @@ const intakeLoginLimiter = rateLimit({
 
 const intakeWriteLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 20,
+    limit: 20,
     message: { error: 'Slow down a moment, then try again.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -1759,7 +1759,7 @@ app.get('/api/cron/flight-schedule', async (req, res) => {
     }
 });
 
-app.all('/api/*', (req, res) => {
+app.all('/api/*rest', (req, res) => {
     res.status(404).json({ error: 'Not found' });
 });
 
@@ -1771,7 +1771,7 @@ app.get('/intake', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'intake.html'));
 });
 
-app.get('*', (req, res) => {
+app.get('/*path', (req, res) => {
     if (req.path.includes('..') || req.path.includes('//')) {
         return res.status(403).json({ error: 'Access denied' });
     }

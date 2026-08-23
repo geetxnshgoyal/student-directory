@@ -738,6 +738,29 @@ body {
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.fy-chip:hover {
+    border-color: var(--border-focus);
+    color: var(--text-primary);
+}
+
+.fy-chip.active {
+    background: var(--gradient-primary);
+    border-color: transparent;
+    color: var(--text-inverse);
+}
+
+.fy-chip.active b {
+    color: var(--text-inverse);
+}
+
+.fy-chip:focus-visible {
+    outline: 2px solid var(--border-focus);
+    outline-offset: 2px;
 }
 
 .fy-chip b {
@@ -772,7 +795,7 @@ body {
 
 .entry-card:hover {
     border-color: var(--border-focus);
-    transform: translateY(-2px);
+    background: var(--bg-input);
 }
 
 .entry-photo {
