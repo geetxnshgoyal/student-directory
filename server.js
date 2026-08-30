@@ -69,6 +69,18 @@ const {
     missingFields
 } = require('./scripts/first-year-intake');
 const { lookupBatch } = require('./scripts/first-year-batch-list');
+const {
+    ENTRY_COLLECTION: YEARBOOK_ENTRY_COLLECTION,
+    NOTE_COLLECTION: YEARBOOK_NOTE_COLLECTION,
+    MAX_QUOTE: YEARBOOK_MAX_QUOTE,
+    MAX_ABOUT: YEARBOOK_MAX_ABOUT,
+    MAX_NOTE: YEARBOOK_MAX_NOTE,
+    publicId: yearbookPublicId,
+    isPublicId: isYearbookId,
+    noteDocId: yearbookNoteDocId,
+    normalizeNote: normalizeYearbookNote,
+    validateEntryPayload: validateYearbookEntry
+} = require('./scripts/yearbook');
 
 const app = express();
 // Vercel terminates TLS in front of us. Without this every request looks like it
@@ -114,9 +126,19 @@ const CARPOOL_COLLECTIONS = {
     flightSchedule: SCHEDULE_COLLECTION
 };
 
+// Separate from the carpool collections above because it is a separate product,
+// but it rides the same store helpers and so needs the same in-memory backing.
+const YEARBOOK_COLLECTIONS = {
+    entries: YEARBOOK_ENTRY_COLLECTION,
+    notes: YEARBOOK_NOTE_COLLECTION
+};
+
 // Carpool state lives in Firestore so it survives across serverless invocations.
 // These maps only back local runs started without Firebase credentials.
-const carpoolMemory = new Map(Object.values(CARPOOL_COLLECTIONS).map(name => [name, new Map()]));
+const carpoolMemory = new Map(
+    [...Object.values(CARPOOL_COLLECTIONS), ...Object.values(YEARBOOK_COLLECTIONS)]
+        .map(name => [name, new Map()])
+);
 
 const smtpConfig = {
     host: process.env.SMTP_HOST,
@@ -1683,6 +1705,482 @@ app.post('/api/carpool/cancel', apiLimiter, requireCarpoolSession, async (req, r
 
 
 
+// ===== Yearbook =====
+//
+// The batch shown to the batch: a wall of portraits where everyone writes their
+// own line and signs each other's pages. It reuses the carpool's student login -
+// same USN and OTP, same four-hour opaque session - because a second login for
+// the same people is just a second thing to get wrong.
+//
+// Two rules shape everything below.
+//
+// A USN never reaches the client. The directory is admin-only; this page is open
+// to the whole batch, so students are addressed by the derived handle in
+// scripts/yearbook.js and the server maps it back against the roster.
+//
+// And nothing one student writes about another is visible to anyone else until
+// the person it is about puts it up. Notes are signed, never anonymous, and wait
+// on the recipient's own page until they say so.
+
+// The session the carpool already issues. Aliased so these routes do not read as
+// though they were carpool code.
+const requireStudentSession = requireCarpoolSession;
+
+const yearbookWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 20,
+    message: { error: 'Slow down a moment, then try again.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Portraits arrive in chunks as the grid scrolls, so this endpoint is asked far
+// more often than the rest: 122 students at 30 a chunk is five calls for one pass
+// down the page, and the standard 60/min ceiling would cut off anyone who
+// scrolled up and down twice.
+const yearbookPhotoLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    message: { error: 'Rate limit exceeded' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const YEARBOOK_ROSTER_TTL_MS = 60 * 1000;
+const YEARBOOK_PHOTO_CHUNK = 30;
+
+let yearbookRosterCache = { at: 0, rows: null };
+
+// carpoolGet/Set/Delete are generic over the collection name. This is the same
+// adapter shape flightScheduleStore uses, so the routes below never have to call
+// something named after a different product.
+const yearbookStore = {
+    get: (collection, id) => carpoolGet(collection, id),
+    set: (collection, id, data) => carpoolSet(collection, id, data),
+    delete: (collection, id) => carpoolDelete(collection, id),
+    list: (collection) => carpoolList(collection)
+};
+
+/**
+ * Names and batches for the whole roster, without the portraits.
+ *
+ * select() leaves the base64 in Firestore. The photos come to about 2.4MB across
+ * the batch, and pulling all of them to answer "who is in this year" would
+ * dominate every request that is not actually asking for a photo.
+ */
+async function loadYearbookRoster() {
+    if (!firestore) return null;
+
+    const now = Date.now();
+    if (yearbookRosterCache.rows && now - yearbookRosterCache.at < YEARBOOK_ROSTER_TTL_MS) {
+        return yearbookRosterCache.rows;
+    }
+
+    const snapshot = await firestore.collection('students')
+        .select('usn', 'name', 'batch', 'status')
+        .get();
+
+    const rows = snapshot.docs
+        .map(doc => {
+            const record = doc.data() || {};
+            return {
+                // The field is what a session carries and what a note is keyed by;
+                // the document id is what a photo read addresses. They are the same
+                // for every row today, and keeping both means a row where they ever
+                // diverge still resolves rather than silently losing its portrait.
+                usn: record.usn || doc.id,
+                docId: doc.id,
+                name: record.name || '',
+                batch: record.batch || '',
+                status: record.status || ''
+            };
+        })
+        // Someone who has left keeps their directory row, because the admin view
+        // needs it, but does not belong on this year's wall.
+        .filter(row => row.usn && row.status !== 'left')
+        .map(row => ({ ...row, id: yearbookPublicId(row.usn, JWT_SECRET) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    yearbookRosterCache = { at: now, rows };
+    return rows;
+}
+
+async function resolveYearbookStudent(id) {
+    if (!isYearbookId(id)) return null;
+    const roster = await loadYearbookRoster();
+    return roster ? roster.find(row => row.id === id) || null : null;
+}
+
+// Keyed by USN, which is also the document id.
+async function loadYearbookEntries() {
+    const rows = await yearbookStore.list(YEARBOOK_ENTRY_COLLECTION);
+    return new Map(rows.map(row => [row.id, row]));
+}
+
+// One equality filter, so no composite index is needed. Ordering happens in JS
+// for the same reason the intake list sorts there.
+async function listNotesFor(usn) {
+    if (firestore) {
+        const snap = await firestore.collection(YEARBOOK_NOTE_COLLECTION)
+            .where('toUsn', '==', usn)
+            .get();
+        return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+    return (await yearbookStore.list(YEARBOOK_NOTE_COLLECTION)).filter(row => row.toUsn === usn);
+}
+
+// Just the recipient of every note that is actually up, to put a count on each
+// card without shipping the notes themselves to the grid.
+async function approvedNoteCounts() {
+    let rows;
+    if (firestore) {
+        const snap = await firestore.collection(YEARBOOK_NOTE_COLLECTION)
+            .where('approved', '==', true)
+            .select('toUsn')
+            .get();
+        rows = snap.docs.map(doc => doc.data() || {});
+    } else {
+        rows = (await yearbookStore.list(YEARBOOK_NOTE_COLLECTION)).filter(row => row.approved);
+    }
+
+    const counts = new Map();
+    for (const row of rows) counts.set(row.toUsn, (counts.get(row.toUsn) || 0) + 1);
+    return counts;
+}
+
+function serializeYearbookNote(note, { roster, viewerUsn }) {
+    const author = roster.find(row => row.usn === note.fromUsn);
+    return {
+        // Resolved off the roster where possible so a corrected spelling in the
+        // directory shows up here too; the stored name is the fallback for an
+        // author who has since left.
+        from: author?.name || note.fromName || 'A classmate',
+        authorId: author?.id || yearbookPublicId(note.fromUsn, JWT_SECRET),
+        text: note.text || '',
+        at: note.updatedAt || note.createdAt || null,
+        approved: Boolean(note.approved),
+        isMine: note.fromUsn === viewerUsn
+    };
+}
+
+app.get('/api/yearbook/overview', apiLimiter, requireStudentSession, async (req, res) => {
+    try {
+        const viewerUsn = req.carpoolUser.usn;
+        const roster = await loadYearbookRoster();
+        if (!roster) return res.status(503).json({ error: 'Database service offline' });
+
+        const [entries, counts, myNotes] = await Promise.all([
+            loadYearbookEntries(),
+            approvedNoteCounts(),
+            listNotesFor(viewerUsn)
+        ]);
+
+        const mine = entries.get(viewerUsn) || {};
+
+        res.json({
+            me: {
+                id: yearbookPublicId(viewerUsn, JWT_SECRET),
+                name: req.carpoolUser.name || '',
+                quote: mine.quote || '',
+                about: mine.about || '',
+                hidden: Boolean(mine.hidden),
+                // Notes waiting for them to decide on, and notes already up.
+                pending: myNotes.filter(note => !note.approved).length,
+                signed: myNotes.filter(note => note.approved).length
+            },
+            students: roster
+                // Someone who opted out drops off the wall, but still sees their
+                // own card so they can find the switch again.
+                .filter(row => row.usn === viewerUsn || !entries.get(row.usn)?.hidden)
+                .map(row => ({
+                    id: row.id,
+                    name: row.name,
+                    batch: row.batch,
+                    quote: entries.get(row.usn)?.quote || '',
+                    notes: counts.get(row.usn) || 0,
+                    hidden: Boolean(entries.get(row.usn)?.hidden),
+                    isYou: row.usn === viewerUsn
+                })),
+            limits: { quote: YEARBOOK_MAX_QUOTE, about: YEARBOOK_MAX_ABOUT, note: YEARBOOK_MAX_NOTE },
+            photoChunk: YEARBOOK_PHOTO_CHUNK
+        });
+    } catch (e) {
+        console.error('Yearbook overview failed:', e);
+        res.status(500).json({ error: 'Could not load the yearbook' });
+    }
+});
+
+// Portraits for a slice of the grid. Batched rather than one request per card:
+// 122 separate calls would trip any sane rate limit and spend most of their time
+// on round trips, since the median portrait is only about 19KB.
+app.get('/api/yearbook/photos', yearbookPhotoLimiter, requireStudentSession, async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+
+    const ids = String(req.query.ids || '').split(',').map(part => part.trim()).filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: 'No students asked for' });
+    if (ids.length > YEARBOOK_PHOTO_CHUNK) {
+        return res.status(400).json({ error: `Ask for at most ${YEARBOOK_PHOTO_CHUNK} portraits at a time` });
+    }
+
+    try {
+        const roster = await loadYearbookRoster();
+        if (!roster) return res.status(503).json({ error: 'Database service offline' });
+
+        const entries = await loadYearbookEntries();
+        const byId = new Map(roster.map(row => [row.id, row]));
+        const wanted = [...new Set(ids.filter(isYearbookId))]
+            .map(id => byId.get(id))
+            .filter(row => row && !entries.get(row.usn)?.hidden);
+
+        if (!wanted.length) return res.json({ success: true, photos: {} });
+
+        // fieldMask keeps this to the one field that matters. Without it every
+        // portrait would arrive alongside the student's phone number and address.
+        const docs = await firestore.getAll(
+            ...wanted.map(row => firestore.collection('students').doc(row.docId)),
+            { fieldMask: ['photo'] }
+        );
+
+        const photos = {};
+        docs.forEach((doc, index) => {
+            const photo = doc.exists ? (doc.data() || {}).photo : '';
+            if (photo && String(photo).startsWith('data:image')) photos[wanted[index].id] = photo;
+        });
+
+        res.json({ success: true, photos });
+    } catch (e) {
+        console.error('Yearbook photos failed:', e);
+        res.status(500).json({ error: 'Could not load portraits' });
+    }
+});
+
+app.get('/api/yearbook/students/:id', apiLimiter, requireStudentSession, async (req, res) => {
+    try {
+        const viewerUsn = req.carpoolUser.usn;
+        const roster = await loadYearbookRoster();
+        if (!roster) return res.status(503).json({ error: 'Database service offline' });
+
+        const student = await resolveYearbookStudent(req.params.id);
+        if (!student) return res.status(404).json({ error: 'No such page' });
+
+        const entries = await loadYearbookEntries();
+        const entry = entries.get(student.usn) || {};
+        const isYou = student.usn === viewerUsn;
+
+        // Opting out has to mean the page is gone, not merely unlinked.
+        if (entry.hidden && !isYou) return res.status(404).json({ error: 'No such page' });
+
+        const notes = await listNotesFor(student.usn);
+
+        res.json({
+            student: {
+                id: student.id,
+                name: student.name,
+                batch: student.batch,
+                quote: entry.quote || '',
+                about: entry.about || '',
+                hidden: Boolean(entry.hidden),
+                isYou
+            },
+            notes: notes
+                // A pending note is visible to exactly two people: whoever wrote
+                // it, and whoever it is about.
+                .filter(note => note.approved || isYou || note.fromUsn === viewerUsn)
+                .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+                .map(note => serializeYearbookNote(note, { roster, viewerUsn })),
+            // Their own note to this student, whatever state it is in, so the
+            // composer opens on what they last wrote rather than an empty box.
+            myNote: (() => {
+                const own = notes.find(note => note.fromUsn === viewerUsn);
+                return own ? { text: own.text, approved: Boolean(own.approved) } : null;
+            })()
+        });
+    } catch (e) {
+        console.error('Yearbook profile failed:', e);
+        res.status(500).json({ error: 'Could not load that page' });
+    }
+});
+
+app.put('/api/yearbook/me', yearbookWriteLimiter, requireStudentSession, async (req, res) => {
+    const { value } = validateYearbookEntry(req.body);
+    if (Object.keys(value).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+    try {
+        const usn = req.carpoolUser.usn;
+        // carpoolSet overwrites rather than merges, so the existing entry is read
+        // back first: saving a quote must not blank out an about.
+        const existing = (await yearbookStore.get(YEARBOOK_ENTRY_COLLECTION, usn)) || {};
+        const now = new Date().toISOString();
+
+        await yearbookStore.set(YEARBOOK_ENTRY_COLLECTION, usn, {
+            ...existing,
+            ...value,
+            usn,
+            createdAt: existing.createdAt || now,
+            updatedAt: now
+        });
+
+        res.json({ success: true, ...value });
+    } catch (e) {
+        console.error('Yearbook entry save failed:', e);
+        res.status(500).json({ error: 'Could not save your entry' });
+    }
+});
+
+app.put('/api/yearbook/students/:id/note', yearbookWriteLimiter, requireStudentSession, async (req, res) => {
+    const text = normalizeYearbookNote(req.body?.text);
+    if (!text) return res.status(400).json({ error: 'Write something first' });
+
+    try {
+        const viewerUsn = req.carpoolUser.usn;
+        const student = await resolveYearbookStudent(req.params.id);
+        if (!student) return res.status(404).json({ error: 'No such page' });
+        if (student.usn === viewerUsn) return res.status(400).json({ error: 'You cannot sign your own page' });
+
+        const entries = await loadYearbookEntries();
+        if (entries.get(student.usn)?.hidden) {
+            return res.status(403).json({ error: 'They are not on the yearbook' });
+        }
+
+        const docId = yearbookNoteDocId(student.usn, viewerUsn);
+        const existing = await yearbookStore.get(YEARBOOK_NOTE_COLLECTION, docId);
+        const now = new Date().toISOString();
+
+        await yearbookStore.set(YEARBOOK_NOTE_COLLECTION, docId, {
+            toUsn: student.usn,
+            fromUsn: viewerUsn,
+            fromName: req.carpoolUser.name || '',
+            text,
+            // An edit drops back to pending on purpose. Without that, a note could
+            // be approved as one thing and quietly rewritten into another.
+            approved: false,
+            createdAt: existing?.createdAt || now,
+            updatedAt: now
+        });
+
+        res.json({ success: true, pending: true });
+    } catch (e) {
+        console.error('Yearbook note save failed:', e);
+        res.status(500).json({ error: 'Could not save your note' });
+    }
+});
+
+app.delete('/api/yearbook/students/:id/note', yearbookWriteLimiter, requireStudentSession, async (req, res) => {
+    try {
+        const student = await resolveYearbookStudent(req.params.id);
+        if (!student) return res.status(404).json({ error: 'No such page' });
+
+        await yearbookStore.delete(
+            YEARBOOK_NOTE_COLLECTION,
+            yearbookNoteDocId(student.usn, req.carpoolUser.usn)
+        );
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Yearbook note delete failed:', e);
+        res.status(500).json({ error: 'Could not remove your note' });
+    }
+});
+
+// The recipient's side of a note. The author is matched by walking the notes
+// actually left on the caller's page rather than by resolving against the roster,
+// so a note still works when whoever wrote it has since left the college.
+async function findNoteOnMyPage(viewerUsn, authorId) {
+    if (!isYearbookId(authorId)) return null;
+    const notes = await listNotesFor(viewerUsn);
+    return notes.find(note => yearbookPublicId(note.fromUsn, JWT_SECRET) === authorId) || null;
+}
+
+app.post('/api/yearbook/notes/:authorId/approve', yearbookWriteLimiter, requireStudentSession, async (req, res) => {
+    const approved = req.body?.approved !== false;
+
+    try {
+        const note = await findNoteOnMyPage(req.carpoolUser.usn, req.params.authorId);
+        if (!note) return res.status(404).json({ error: 'No such note' });
+
+        const { id, ...record } = note;
+        await yearbookStore.set(YEARBOOK_NOTE_COLLECTION, id, {
+            ...record,
+            approved,
+            approvedAt: approved ? new Date().toISOString() : null
+        });
+
+        res.json({ success: true, approved });
+    } catch (e) {
+        console.error('Yearbook note approve failed:', e);
+        res.status(500).json({ error: 'Could not update that note' });
+    }
+});
+
+app.delete('/api/yearbook/notes/:authorId', yearbookWriteLimiter, requireStudentSession, async (req, res) => {
+    try {
+        const note = await findNoteOnMyPage(req.carpoolUser.usn, req.params.authorId);
+        if (!note) return res.status(404).json({ error: 'No such note' });
+
+        await yearbookStore.delete(YEARBOOK_NOTE_COLLECTION, note.id);
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Yearbook note remove failed:', e);
+        res.status(500).json({ error: 'Could not remove that note' });
+    }
+});
+
+// ===== Admin: yearbook moderation =====
+//
+// Approval already means nothing is public without the recipient's say-so. This
+// is the backstop for the case that leaves: a note that upsets the person it was
+// sent to, where they want it gone rather than merely left down.
+
+app.get('/api/admin/yearbook/notes', apiLimiter, requireRole('admin'), async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+    try {
+        const notes = await yearbookStore.list(YEARBOOK_NOTE_COLLECTION);
+        const roster = await loadYearbookRoster();
+        const nameFor = (usn) => roster?.find(row => row.usn === usn)?.name || '';
+
+        res.json({
+            success: true,
+            notes: notes
+                .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+                .map(note => ({
+                    id: note.id,
+                    to: nameFor(note.toUsn),
+                    toUsn: note.toUsn,
+                    from: nameFor(note.fromUsn) || note.fromName || '',
+                    fromUsn: note.fromUsn,
+                    text: note.text,
+                    approved: Boolean(note.approved),
+                    at: note.updatedAt || note.createdAt || null
+                }))
+        });
+    } catch (e) {
+        console.error('Yearbook moderation list failed:', e);
+        res.status(500).json({ error: 'Could not load notes' });
+    }
+});
+
+app.delete('/api/admin/yearbook/notes/:id', apiLimiter, requireRole('admin'), async (req, res) => {
+    if (!firestore) return res.status(503).json({ error: 'Database service offline' });
+
+    // The document id is a pair of USNs, so it is checked rather than trusted:
+    // an id from anywhere else would be a path into another collection.
+    const id = String(req.params.id || '');
+    if (!/^[A-Z0-9]{6,15}_[A-Z0-9]{6,15}$/i.test(id)) {
+        return res.status(400).json({ error: 'Invalid note id' });
+    }
+
+    try {
+        const note = await yearbookStore.get(YEARBOOK_NOTE_COLLECTION, id);
+        if (!note) return res.status(404).json({ error: 'No such note' });
+
+        await yearbookStore.delete(YEARBOOK_NOTE_COLLECTION, id);
+        res.json({ success: true, id });
+    } catch (e) {
+        console.error('Yearbook moderation delete failed:', e);
+        res.status(500).json({ error: 'Could not remove that note' });
+    }
+});
+
+
 // Expose Serverless Cron trigger for Vercel / GitHub Actions
 app.get('/api/cron/birthday', async (req, res) => {
     const authHeader = req.headers.authorization;
@@ -1769,6 +2267,10 @@ app.get('/carpool', (req, res) => {
 
 app.get('/intake', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'intake.html'));
+});
+
+app.get('/yearbook', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'yearbook.html'));
 });
 
 app.get('/*path', (req, res) => {
