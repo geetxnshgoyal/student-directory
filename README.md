@@ -3,6 +3,7 @@
 Three tools for one batch, sharing a codebase, a design system and a Firestore database:
 
 - **Carpool** — students split the campus↔BLR airport run, matched on when they'll actually be at the kerb.
+- **Yearbook** — the batch shown to the batch: everyone writes their own line and signs each other's pages.
 - **Admin directory** — the student roster, searchable, with birthday automation.
 - **First-year intake** — volunteers collect the incoming batch on their phones, photo and all.
 
@@ -21,6 +22,7 @@ npm run dev
 | URL | What |
 |---|---|
 | `/` or `/carpool` | Carpool (students) |
+| `/yearbook` | Yearbook (students) — deliberately unlinked, see below |
 | `/admin.html` | Admin directory |
 | `/intake` | First-year intake (volunteers) |
 
@@ -88,6 +90,63 @@ Filtered to the carriers this batch actually flies: IndiGo, Air India, Air India
 ### Traffic
 
 `scripts/travel-time.js` predicts the hostel→airport drive for the actual departure hour via Google's Routes API (`TRAFFIC_AWARE`). Advisory only: it prefills a picker the student can override, and any failure degrades to a flat estimate. Needs `GOOGLE_MAPS_API_KEY` and `HOSTEL_LATLNG`; without them the picker still works.
+
+---
+
+## The yearbook
+
+`/yearbook`, for the current batch. A wall of portraits where each student writes
+their own line, and signs the pages of the people they want to.
+
+It reuses the carpool's login outright — same USN and OTP, same four-hour
+session, same `cp_token`. Signing in on one page signs you in on the other,
+because a second login for the same people is just a second thing to get wrong.
+
+**Nothing links to it.** There is no button on the carpool or anywhere else; you
+reach it by typing the URL. That is a decision about how widely it gets shared,
+not a security boundary — the URL on its own grants nothing, because every
+yearbook route still demands a student session and returns `401` without one.
+
+### Nothing is public until the person it is about says so
+
+A note is **signed, never anonymous**, and lands on the recipient's page as
+*pending*. Exactly two people can see it in that state: whoever wrote it and
+whoever it is about. It appears on the page for the rest of the batch only when
+the recipient puts it up, and they can take it down or delete it at any time.
+
+**Editing a note sends it back to pending.** Without that, a note could be
+approved as one thing and quietly rewritten into another.
+
+One note per pair, enforced by the document id rather than a counter: the note
+lives at `{toUsn}_{fromUsn}`, so a second write is an edit and nobody can bury
+someone under fifty messages. Admin moderation exists as a backstop for the case
+approval does not cover — a note that upsets the person it was sent to, where
+they want it gone rather than merely down.
+
+Anyone can take themselves off the wall entirely from their own page. The
+directory is admin-only; this page is not, and somebody who would rather not be
+in front of the whole batch should not have to ask an admin to be removed.
+
+### No USN reaches the client
+
+The board already refuses to put a USN on the wire and the yearbook is read by
+more people than the board is, so students are addressed by an HMAC of their USN
+keyed on `JWT_SECRET`, truncated to 16 hex characters. It is derived rather than
+stored, so there is no id to keep in sync. Rotating `JWT_SECRET` moves every
+handle, which is harmless because nothing persists one — and it has to be stable
+in production anyway or every session breaks.
+
+### Portraits
+
+The roster query uses `select()`, so names and batches arrive without the base64
+photos — those come to about 2.4MB across the batch, and pulling all of them to
+answer "who is in this year" would dominate every request that is not about a
+photo. Portraits load separately in chunks of 30 as cards scroll into view, and
+the read is `fieldMask`ed to the photo alone so nothing else rides along.
+
+`/api` sets `no-store`, so the browser will not cache them; the client keeps its
+own map instead, which is what makes scrolling back up free. A student with no
+portrait is remembered as a miss so they are not asked for again.
 
 ---
 
@@ -205,7 +264,7 @@ Copy `.env.example` to `.env`. Everything except Firebase and SMTP has a working
 
 Authentication is role-based. Three login paths mint different tokens, and verifying the signature is not enough — `requireRole` checks what the token actually is. Without it a student's own token opened the admin roster.
 
-- Carpool sessions are Firestore-backed opaque tokens, 4 h TTL.
+- Carpool sessions are Firestore-backed opaque tokens, 4 h TTL. The yearbook shares them, and an admin JWT does **not** open it — the two are separate axes, asserted by a test.
 - Intake tokens are a fourth role, checked against the live account on every request so a disabled volunteer loses access at once. They cannot reach any admin route.
 - OTPs: attempt-capped, constant-time compared, rate-limited separately from the rest of the API.
 - `trust proxy` is set, so rate limits are per-user rather than one shared bucket behind Vercel's proxy.
@@ -220,11 +279,13 @@ Authentication is role-based. Three login paths mint different tokens, and verif
 server.js                     API, auth, matching, email
 public/
   carpool.html/.js/.css       Student carpool
+  yearbook.html/.js/.css      Yearbook
   admin.html/.js              Admin directory
   intake.html/.js/.css        First-year intake portal
   admin-theme.css             Shared design tokens for admin
   style.css                   Base styles
 scripts/
+  yearbook.js                 Yearbook rules: handles, limits, what may be written
   flight-provider.js          Flight data behind one interface
   flight-schedule.js          Learned schedule estimates
   travel-time.js              Drive time, traffic-aware
@@ -237,6 +298,8 @@ scripts/
 ### Firestore collections
 
 `students`, `carpool_otps`, `carpool_sessions`, `carpool_requests`, `carpool_notified`, `birthday_runs` (one document per day).
+
+The yearbook adds `yearbook_entries` (one per student, keyed by USN: their line, their longer note, whether they opted out) and `yearbook_notes` (keyed `{toUsn}_{fromUsn}`, so one per pair).
 
 First-year intake adds three of its own, deliberately separate from `students`: `students_2030` (the incoming batch, keyed by USN), `intake_users` (volunteer accounts) and `intake_audit` (every create, edit and delete).
 
